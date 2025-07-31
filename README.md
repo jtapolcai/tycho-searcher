@@ -147,3 +147,6 @@ cargo run --release -- --chain ethereum --tvl-threshold 1000 --all-pools --enabl
 ---
 
 For more details, see the documentation and source code. Happy arbitraging! 
+
+## Contributors
+- Janos Tapolcai (core developer)
