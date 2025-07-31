@@ -1,0 +1,210 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{enumitem}
+
+\title{Tycho Solver Documentation}
+\author{Project Tycho}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\tableofcontents
+
+\section{Overview}
+The Tycho Solver is a Rust-based component designed to process real-time blockchain data and identify arbitrage opportunities using advanced graph algorithms. It receives block updates from a data feed, maintains an up-to-date graph of token exchanges, and applies a modified Bellman-Ford algorithm to detect negative cycles, which correspond to profitable arbitrage paths.
+
+\section{System Architecture}
+\begin{itemize}[leftmargin=*, label=--]
+    \item \textbf{Tycho Feed:} An asynchronous task receives block updates and token data from an external source, forwarding them to the solver.
+    \item \textbf{Solver:} Maintains the exchange graph, updates it with new data, and runs the arbitrage detection algorithm.
+    \item \textbf{Channels:} Uses asynchronous channels (\texttt{tokio::sync::mpsc}) to communicate between the feed and the solver.
+\end{itemize}
+
+\section{Solver Workflow}
+\begin{enumerate}[leftmargin=*, label=\arabic*.]
+    \item \textbf{Initialization:} The solver initializes its graph structures and awaits block updates.
+    \item \textbf{Block Update Handling:} On receiving a new block, the solver updates the graph with the latest exchange rates and liquidity data.
+    \item \textbf{Arbitrage Detection:} The solver runs the modified Bellman-Ford algorithm to find negative cycles, which indicate arbitrage opportunities.
+    \item \textbf{Result Export:} Detected opportunities are processed and can be exported or logged for further action.
+\end{enumerate}
+
+\section{Modified Bellman-Ford Algorithm}
+\subsection{Purpose}
+The Bellman-Ford algorithm is used to find the shortest paths in a weighted graph. In the context of the Tycho Solver, it is adapted to detect negative cycles, which correspond to arbitrage opportunities in the exchange graph.
+
+\subsection{Data Structures}
+\begin{itemize}[leftmargin=*, label=--]
+    \item \texttt{Graph}: A directed graph where nodes represent tokens and edges represent exchange rates.
+    \item \texttt{Edge Weights}: Edge weights are computed as the negative logarithm of the exchange rate, so that a negative cycle indicates a profitable arbitrage loop.
+    \item \texttt{BigUint}: Used for precise, overflow-safe arithmetic on large integer values representing token amounts.
+    \item \texttt{Rc<Vec<EdgeIndex>>}: To avoid unnecessary data copying, cycles found by the algorithm are stored as reference-counted vectors, reducing memory overhead and improving performance.
+\end{itemize}
+
+\subsection{Algorithm Steps}
+\begin{enumerate}[leftmargin=*, label=\arabic*.]
+    \item Initialize distances from the source node to all other nodes as infinity, except the source itself (zero).
+    \item For each edge, relax the edge by updating the destination node's distance if a shorter path is found.
+    \item Repeat the relaxation step for $|V|-1$ iterations, where $|V|$ is the number of vertices.
+    \item After the main loop, check for negative cycles by verifying if any edge can still be relaxed. If so, reconstruct the cycle.
+    \item Store detected cycles as \texttt{Rc<Vec<EdgeIndex>>} to minimize cloning and memory usage.
+\end{enumerate}
+
+\subsection{Optimizations}
+\begin{itemize}[leftmargin=*, label=--]
+    \item \textbf{Reference Counting:} By using \texttt{Rc<Vec<EdgeIndex>>}, the algorithm avoids deep cloning of cycle paths, which is especially beneficial when many cycles are detected.
+    \item \textbf{Efficient Graph Updates:} Only relevant parts of the graph are updated on each block, minimizing recomputation.
+    \item \textbf{BigUint Arithmetic:} Ensures that all calculations are safe from overflow, which is critical for financial computations.
+\end{itemize}
+
+\section{Example: Negative Cycle Detection}
+\begin{lstlisting}[language=Rust, caption=Finding Negative Cycles]
+// Pseudocode for negative cycle detection
+for each node in graph {
+    run bellman_ford from node
+    if negative cycle found {
+        store Rc<Vec<EdgeIndex>> for the cycle
+    }
+}
+\end{lstlisting}
+
+\section{Algorithm Details}
+
+\subsection{High-Level Solver Flow}
+Below is a high-level flowchart of the solver's main loop:
+
+\begin{verbatim}
+%% Mermaid flowchart (render with mermaid CLI or online)
+flowchart TD
+    A["Start: Receive Block Update"] --> B["Update Graph with New Pools/States"]
+    B --> C["For Each Component"]
+    C --> D["Run Bellman-Ford from Start Node"]
+    D --> E["Relax Edges for N Iterations"]
+    E --> F["Detect Negative Cycles"]
+    F --> G["For Each Cycle"]
+    G --> H["Optimize Input Amount (Golden Section Search)"]
+    H --> I{"Profit > 0?"}
+    I -- "Yes" --> J["Log/Export Arbitrage"]
+    I -- "No" --> K["Skip"]
+    J --> L["Wait for Next Block"]
+    K --> L
+    L --> A
+\end{verbatim}
+
+\subsection{Bellman-Ford Relaxation and Negative Cycle Detection}
+
+\begin{verbatim}
+%% Mermaid flowchart (render with mermaid CLI or online)
+flowchart TD
+    subgraph BellmanFord["Bellman-Ford Relaxation Loop"]
+        B1["Initialize distances: ∞, source=0"]
+        B2["Repeat for |V|-1 iterations:"]
+        B3["  For each edge (u,v):"]
+        B4["    If d[v] > d[u] + w(u,v):"]
+        B5["      d[v] = d[u] + w(u,v)"]
+        B6["      pred[v] = u"]
+        B2 --> B3 --> B4 --> B5 --> B6
+    end
+    B1 --> B2
+    B6 --> C["Check for negative cycles"]
+    C --> D{"Any edge can still be relaxed?"}
+    D -- "Yes" --> E["Reconstruct cycle using pred[]"]
+    D -- "No" --> F["No negative cycle"]
+    E --> G["Store cycle as Rc<Vec<EdgeIndex>>"]
+    F --> H["Done"]
+    G --> H
+\end{verbatim}
+
+\subsection{Component Interaction Sequence}
+
+\begin{verbatim}
+%% Mermaid sequence diagram (render with mermaid CLI or online)
+sequenceDiagram
+    participant S as Solver
+    participant G as Graph
+    participant B as BellmanFord
+    participant O as Optimizer
+    S->>G: Update with new block
+    S->>B: Run Bellman-Ford
+    B->>G: Relax edges
+    B->>B: Repeat for N iterations
+    B->>G: Check for negative cycles
+    B-->>S: Return cycles
+    S->>O: For each cycle, optimize input amount
+    O-->>S: Return best amount, profit
+    S->>S: If profit > 0, log/export arbitrage
+    S->>S: Wait for next block
+\end{verbatim}
+
+\subsection{Pseudo-code}
+
+\textbf{Main Solver Loop:}
+\begin{lstlisting}[language=Rust]
+loop {
+    receive block update;
+    update graph with new pools/states;
+    for each component in graph {
+        run Bellman-Ford from start node;
+        for each negative cycle found {
+            optimize input amount (golden section search);
+            if profit > 0 {
+                log/export arbitrage;
+            }
+        }
+    }
+}
+\end{lstlisting}
+
+\textbf{Bellman-Ford Relaxation:}
+\begin{lstlisting}[language=Rust]
+for i in 1..=V-1 {
+    for each edge (u, v) {
+        if d[v] > d[u] + w(u, v) {
+            d[v] = d[u] + w(u, v);
+            pred[v] = u;
+        }
+    }
+}
+\end{lstlisting}
+
+\textbf{Negative Cycle Detection:}
+\begin{lstlisting}[language=Rust]
+for each edge (u, v) {
+    if d[v] > d[u] + w(u, v) {
+        // Negative cycle found
+        reconstruct cycle using pred[];
+        store cycle as Rc<Vec<EdgeIndex>>;
+    }
+}
+\end{lstlisting}
+
+\textbf{Profit Optimization (Golden Section Search):}
+\begin{lstlisting}[language=Rust]
+fn optimize_cycle_gss(cycle, graph, source, min, max, tol, max_iter, gas_price) {
+    // Search for input amount that maximizes profit
+    let (best_x, best_profit) = golden_section_search(min, max, tol, max_iter, |x| {
+        let profit = simulate_cycle_profit(cycle, x, graph, source, gas_price);
+        return profit;
+    });
+    return (best_x, best_profit);
+}
+\end{lstlisting}
+
+\textbf{Edge Cases and Optimizations:}
+\begin{itemize}
+    \item Cycles are only considered if they start and end at the designated start token (e.g., WETH).
+    \item Reference-counted vectors (\texttt{Rc<Vec<EdgeIndex>>}) are used to avoid unnecessary cloning.
+    \item The algorithm skips cycles that revisit nodes to avoid infinite loops.
+    \item Profit calculation includes gas costs, and only cycles with net positive profit are exported.
+    \item The golden section search adapts the input range if invalid points are encountered.
+\end{itemize}
+
+\section{Conclusion}
+The Tycho Solver combines real-time data processing with efficient graph algorithms to detect arbitrage opportunities in decentralized exchanges. The use of optimized data structures, such as reference-counted vectors and big integer arithmetic, ensures both performance and correctness.
+
+\end{document} 
