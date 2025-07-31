@@ -22,8 +22,8 @@ use tycho_simulation::{
 use std::env;
 use clap::Parser;
 // Add ethers imports
-use ethers::providers::{Provider, Http, Middleware};
-use ethers::types::U256;
+//use ethers::providers::{Provider, Http, Middleware};
+//use ethers::types::U256;
 use std::collections::HashSet;
 use hex::decode;
 
@@ -103,13 +103,13 @@ pub fn get_rpc_url(chain: &Chain) -> Option<String> {
     }
 }
 
-pub async fn get_gas_price(chain: &Chain) -> anyhow::Result<U256> {
-    let url = get_rpc_url(chain).ok_or_else(|| anyhow::anyhow!("Missing RPC URL for chain"))?;
-    let provider = Provider::<Http>::try_from(url.as_str())?
-        .interval(std::time::Duration::from_millis(200)); // optional rate limit
-    let gas_price = provider.get_gas_price().await?;
-    Ok(gas_price)
-}
+//pub async fn get_gas_price(chain: &Chain) -> anyhow::Result<BigUint> {
+//    let url = get_rpc_url(chain).ok_or_else(|| anyhow::anyhow!("Missing RPC URL for chain"))?;
+//    let provider = Provider::<Http>::try_from(url.as_str())?
+//        .interval(std::time::Duration::from_millis(200)); // optional rate limit
+//    let gas_price = provider.get_gas_price().await?;
+//    Ok(gas_price)
+//}
 
 pub fn register_exchanges(
     builder: ProtocolStreamBuilder,

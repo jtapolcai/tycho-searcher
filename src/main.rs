@@ -17,7 +17,7 @@ use tycho_simulation::{
     evm::{
         stream::ProtocolStreamBuilder,
     },
-    protocol::models::BlockUpdate,
+    protocol::models::Update,
     utils::load_all_tokens,
 };
 
@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
         HashSet::new()
     });
 
-    let (block_update_tx, block_update_rx) = mpsc::channel::<BlockUpdate>(100);
+    let (block_update_tx, block_update_rx) = mpsc::channel::<Update>(100);
 
     let searcher = Searcher::new(
         block_update_rx,
@@ -111,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
         while let Some(msg) = protocol_stream.next().await {
             match msg {
                 Ok(block_update) => {
-                    println!("Received block update from tycho: {}", block_update.block_number);
+                    println!("Received block update from tycho: {}", block_update.block_number_or_timestamp);
                     if let Err(e) = tx_clone.send(block_update).await {
                         eprintln!("Failed to send block update to searcher: {}", e);
                         break;

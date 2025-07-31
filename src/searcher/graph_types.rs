@@ -15,10 +15,12 @@ use petgraph::{
 use serde::Serialize;
 
 // Tycho
+use tycho_common::{
+    models::{token::Token},
+    simulation::protocol_sim::ProtocolSim,
+};
 use tycho_simulation::{
-    models::Token,
     protocol::models::ProtocolComponent,
-    protocol::state::ProtocolSim, 
 };
 
 use std::cell::RefCell;

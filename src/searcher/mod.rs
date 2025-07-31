@@ -24,9 +24,12 @@ use num_bigint::BigUint;
 
 // Tycho
 use tycho_simulation::{
-    models::Token,
-    protocol::models::{BlockUpdate, ProtocolComponent},
-    protocol::state::ProtocolSim,
+    protocol::models::{Update, ProtocolComponent},
+};
+
+use tycho_common::{
+    models::{token::Token},
+    simulation::protocol_sim::ProtocolSim,
 };
 
 use std::cell::RefCell;
@@ -62,7 +65,7 @@ pub struct Searcher {
     components: GraphComponents,
     node_indices: HashMap<String, NodeIndex>,
     pub edge_index_by_pool: HashMap<String, Vec<EdgeIndex>>,
-    rx: Receiver<BlockUpdate>,
+    rx: Receiver<Update>,
     start_token_index: Option<NodeIndex>,
     start_token_name: Option<String>,
     blacklist_tokens: HashSet<Vec<u8>>,
@@ -73,7 +76,7 @@ pub struct Searcher {
 
 impl Searcher {
     pub fn new(
-        block_update_rx: Receiver<BlockUpdate>,
+        block_update_rx: Receiver<Update>,
         cli: crate::command_line_parameters::Cli,
         blacklist_tokens: HashSet<Vec<u8>>,
         rpc_url: String, // Hozzáadott paraméter
@@ -184,10 +187,10 @@ impl Searcher {
         Ok(())
     }
 
-    pub fn update_graph(&mut self, update: &BlockUpdate) -> Result< HashSet<usize>, GraphError> {
+    pub fn update_graph(&mut self, update: &Update) -> Result< HashSet<usize>, GraphError> {
         let mut bool_update_graph = false;
         let first_run=self.start_token_index.is_none();
-        let block_number= format!("block:{}",update.block_number);
+        let block_number= format!("block:{}",update.block_number_or_timestamp);
         for (_id, comp) in update.new_pairs.iter() {
             let pool_address = format!("0x{}", hex::encode(&comp.id));
             if comp.protocol_system == "uniswap_v4" {
@@ -344,7 +347,6 @@ impl Searcher {
     pub async fn run(mut self) -> anyhow::Result<()> {
         //println!("Solver loop started...");
         while let Some(data) = self.rx.recv().await {
-            // Lekérdezzük a gas price-t az Ethereum node-tól
             let gas_price = match self.rpc_url.parse() {
                 Ok(url) => {
                     let provider = ProviderBuilder::new().connect_http(url);
@@ -368,7 +370,7 @@ impl Searcher {
             //     println!("Satistics of the channel between the searcher and executor thread: {}", self.get_channel_health());
             // }
             
-            let block_number = format!("block:{}", data.block_number);
+            let block_number = format!("block:{}", data.block_number_or_timestamp);
             let first_run=self.start_token_index.is_none();
             match self.update_graph(&data) {
                 Ok(components_to_update) => {

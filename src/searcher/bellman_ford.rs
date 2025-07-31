@@ -47,7 +47,9 @@ use std::sync::Arc;
 use crate::searcher::{EdgeData,NodeData,Statistics};
 use crate::searcher::price_quoter::PriceDataRaw;
 use std::collections::{HashSet, HashMap};
-use tycho_simulation::protocol::state::ProtocolSim;
+use tycho_common::{
+    simulation::protocol_sim::ProtocolSim,
+};
 
 // pub struct CycleSearch {
 //     graph: &mut Graph<NodeData, RefCell<EdgeData>, Directed>,

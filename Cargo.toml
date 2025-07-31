@@ -24,12 +24,10 @@ chrono = "0.4"
 url = "2.5"
 
 
-tycho-common = "0.70.7"
-tycho-client = "0.70.7"
-tycho-simulation = { git = "https://github.com/propeller-heads/tycho-simulation.git", package = "tycho-simulation" }
-tycho-execution = "0.102.0"
-
-
+tycho-common = "0.81.0"
+tycho-client = "0.81.0"
+tycho-simulation = { git = "https://github.com/propeller-heads/tycho-simulation.git", package = "tycho-simulation", version = "0.140.0" }
+alloy = { version = "1.0.22", features = ["providers", "rpc-types-eth"] }
 
 [[bin]]
 name = "tycho-searcher"

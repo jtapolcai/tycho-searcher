@@ -16,9 +16,10 @@ use num_traits::{ToPrimitive, Zero};
 
 use ordered_float::OrderedFloat;
 
-use tycho_simulation::{
-    models::Token,
+use tycho_common::{
+    models::{token::Token},
 };
+
 use hex::ToHex;
 
 #[derive(Debug, Clone, PartialEq)]

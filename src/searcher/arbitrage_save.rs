@@ -35,10 +35,13 @@ use std::fs;
 use std::io::Write;
 
 // Tycho
+use tycho_common::{
+    models::{token::Token},
+    simulation::protocol_sim::ProtocolSim,
+};
+
 use tycho_simulation::{
-    models::Token,
     protocol::models::ProtocolComponent,
-    protocol::state::ProtocolSim,
 };
 
 #[derive(Serialize)]
