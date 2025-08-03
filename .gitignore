@@ -1,6 +1,8 @@
 # Cargo output (build artifacts)
 /target/
 
+.env
+
 # Dependency file
 **/Cargo.lock
 
