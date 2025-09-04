@@ -1,12 +1,11 @@
 // source .env && cargo run 
 // === Modules ===
 pub mod searcher;
-// === Std ===
+
 use std::{
     env,
     str::FromStr,
 };
-
 use clap::Parser;
 use std::collections::HashSet;
 
@@ -63,12 +62,12 @@ async fn main() -> anyhow::Result<()> {
         rpc_url,
     );
 
-    // Enable Bellman-Ford logging if requested
-    if cli.enable_bf_logging {
-        println!("📝 Bellman-Ford detailed logging enabled - writing to log.txt");
-        crate::searcher::bellman_ford::enable_logging();
+    // Enable/disable console logs for log_* macros
+    if cli.log {
+        println!("Console logging enabled (--log)");
+        crate::searcher::logging::enable();
     } else {
-        println!("📝 Bellman-Ford detailed logging disabled");
+        crate::searcher::logging::disable();
     }
 
     let searcher_task = tokio::spawn(async move {

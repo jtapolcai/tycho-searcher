@@ -74,9 +74,9 @@ pub struct Cli {
     #[arg(long, default_value = "false")]
     pub try_real: bool,
     
-    /// Enable Bellman-Ford detailed logging to log.txt
+    /// Enable simple console logs from log_* macros
     #[arg(long, default_value = "false")]
-    pub enable_bf_logging: bool,
+    pub log: bool,
 }
 
 pub fn get_default_url(chain: &Chain) -> Option<String> {

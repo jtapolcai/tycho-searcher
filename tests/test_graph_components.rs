@@ -5,7 +5,7 @@ mod tests {
 
     use petgraph::graph::Graph;
     use petgraph::Directed; // Explicitly import Directed and Undirected for tests
-    use petgraph::visit::EdgeRef; // Import EdgeRef trait for source() and target()
+   // use petgraph::visit::EdgeRef; // Import EdgeRef trait for source() and target()
     use std::collections::{HashSet, BTreeMap};
     use std::sync::Arc;
     use num_bigint::BigUint;
@@ -13,10 +13,7 @@ mod tests {
     use hex; // For hex::decod
     use petgraph::prelude::NodeIndex;
     use std::cell::RefCell;
-    use tycho_simulation::{
-        protocol::models::ProtocolComponent,
-        protocol::state::ProtocolSim,
-    };
+    use tycho_simulation::protocol::models::ProtocolComponent;
 
     use tycho_common::{dto::ProtocolStateDelta, Bytes};
 
@@ -28,13 +25,11 @@ mod tests {
     // Add any necessary imports for trait bounds
     use std::any::Any;
     use std::collections::HashMap;
-    use tycho_simulation::{
-        models::{Balances, Token},
-        protocol::{
-            errors::{SimulationError, TransitionError},
-            models::GetAmountOutResult,
-        },
-    };
+    // no Update needed in these tests
+
+    use tycho_common::models::token::Token;
+    use tycho_common::simulation::protocol_sim::{ProtocolSim, GetAmountOutResult, Balances};
+    use tycho_common::simulation::errors::{SimulationError, TransitionError};
 
     impl ProtocolSim for MockProtocolSim {
         fn fee(&self) -> f64 {
@@ -100,9 +95,12 @@ mod tests {
         NodeData {
             token: Arc::new(Token {
                 address: Bytes::from(hex::decode(format!("{:0>40x}", index)).unwrap()),
+                symbol: if index == 0 { "WETH".to_string() } else { format!("n{}", index) }, // Symbol is now "n{index}"
                 decimals: 18,
-                symbol: format!("n{}", index), // Symbol is now "n{index}"
-                gas: BigUint::from(30000u64 + index as u64),
+                tax: 0,
+                gas: vec![Some(30000u64 + index as u64)],
+                chain: Chain::Ethereum,
+                quality: 100,
             }),
             price: 0.0,
         }
@@ -162,7 +160,8 @@ mod tests {
         let expected_nodes: HashSet<NodeIndex> = HashSet::from([n0, n1, n2]);
         assert_eq!(bcc_nodes, expected_nodes, "BCC nodes should match for simple cycle.");
 
-        assert_eq!(bcc.edge_count(), 3, "BCC should have 3 edges for simple cycle.");
+    // Each undirected edge is represented by two directed edges
+    assert_eq!(bcc.edge_count(), 6, "BCC should have 6 directed edges for simple 3-edge cycle.");
 
         // Check node mappings
         assert_eq!(components.original_node_to_component_map.len(), 3, "All original nodes should be mapped.");
@@ -415,23 +414,42 @@ mod tests {
         components.print_summary(&graph);
         // For each edge, check that it is mapped to the correct component
         // First cycle edges
-        let first_cycle_edges = vec![
-            (n0, n1), (n1, n3), (n3, n0)
-        ];
-        let second_cycle_edges = vec![
-            (n3, n2), (n2, n4), (n4, n5), (n5, n3)
-        ];
+        //let first_cycle_edges = vec![
+        //    (n0, n1), (n1, n3), (n3, n0)
+        //];
+        //let second_cycle_edges = vec![
+        //    (n3, n2), (n2, n4), (n4, n5), (n5, n3)
+        //];
         // Find component indices for each cycle by checking which component contains which edge
+        // Determine component indices by mapping original edges using original_edge_to_component_map
+        let e01 = graph.find_edge(n0, n1).unwrap();
+        let e13 = graph.find_edge(n1, n3).unwrap();
+        let e30 = graph.find_edge(n3, n0).unwrap();
+        let comp_idx_e01 = components.original_edge_to_component_map.get(&e01).map(|(idx, _)| *idx);
+        let comp_idx_e13 = components.original_edge_to_component_map.get(&e13).map(|(idx, _)| *idx);
+        let comp_idx_e30 = components.original_edge_to_component_map.get(&e30).map(|(idx, _)| *idx);
+
         let mut first_cycle_comp = None;
+        if comp_idx_e01.is_some() && comp_idx_e01 == comp_idx_e13 && comp_idx_e01 == comp_idx_e30 {
+            first_cycle_comp = comp_idx_e01;
+        }
+
+        let e32 = graph.find_edge(n3, n2).unwrap();
+        let e24 = graph.find_edge(n2, n4).unwrap();
+        let e45 = graph.find_edge(n4, n5).unwrap();
+        let e53 = graph.find_edge(n5, n3).unwrap();
+        let comp_idx_e32 = components.original_edge_to_component_map.get(&e32).map(|(idx, _)| *idx);
+        let comp_idx_e24 = components.original_edge_to_component_map.get(&e24).map(|(idx, _)| *idx);
+        let comp_idx_e45 = components.original_edge_to_component_map.get(&e45).map(|(idx, _)| *idx);
+        let comp_idx_e53 = components.original_edge_to_component_map.get(&e53).map(|(idx, _)| *idx);
+
         let mut second_cycle_comp = None;
-        for (comp_idx, comp) in components.graph_comps.iter().enumerate() {
-            let comp_edges: Vec<_> = comp.edge_references().map(|e| (e.source(), e.target())).collect();
-            if first_cycle_edges.iter().all(|e| comp_edges.contains(e)) {
-                first_cycle_comp = Some(comp_idx);
-            }
-            if second_cycle_edges.iter().all(|e| comp_edges.contains(e)) {
-                second_cycle_comp = Some(comp_idx);
-            }
+        if comp_idx_e32.is_some()
+            && comp_idx_e32 == comp_idx_e24
+            && comp_idx_e32 == comp_idx_e45
+            && comp_idx_e32 == comp_idx_e53
+        {
+            second_cycle_comp = comp_idx_e32;
         }
         assert!(first_cycle_comp.is_some(), "First cycle component not found");
         assert!(second_cycle_comp.is_some(), "Second cycle component not found");
@@ -440,15 +458,15 @@ mod tests {
             (0, 1, "e01"), (1, 3, "e13"), (3, 0, "e30")
         ] {
             let edge_idx = graph.find_edge(NodeIndex::new(u), NodeIndex::new(v)).unwrap();
-            let comp_idx = components.original_edge_to_component_map.get(&edge_idx).expect("Edge not mapped");
-            assert_eq!(*comp_idx, (first_cycle_comp.unwrap(), edge_idx), "Edge ({},{}) not in first cycle component", u, v);
+            let (mapped_comp_idx, _local_edge) = components.original_edge_to_component_map.get(&edge_idx).expect("Edge not mapped");
+            assert_eq!(*mapped_comp_idx, first_cycle_comp.unwrap(), "Edge ({},{}) not in first cycle component", u, v);
         }
         for (u, v, _label) in [
             (3, 2, "e32"), (2, 4, "e24"), (4, 5, "e45"), (5, 3, "e53")
         ] {
             let edge_idx = graph.find_edge(NodeIndex::new(u), NodeIndex::new(v)).unwrap();
-            let comp_idx = components.original_edge_to_component_map.get(&edge_idx).expect("Edge not mapped");
-            assert_eq!(*comp_idx, (second_cycle_comp.unwrap(), edge_idx), "Edge ({},{}) not in second cycle component", u, v);
+            let (mapped_comp_idx, _local_edge) = components.original_edge_to_component_map.get(&edge_idx).expect("Edge not mapped");
+            assert_eq!(*mapped_comp_idx, second_cycle_comp.unwrap(), "Edge ({},{}) not in second cycle component", u, v);
         }
     }
 }

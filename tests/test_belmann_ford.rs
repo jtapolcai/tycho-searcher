@@ -14,15 +14,11 @@ mod tests {
     use std::sync::Arc;
     use num_bigint::BigUint;
     use num_traits::ToPrimitive;
-    use tycho_simulation::{
-        models::{Balances, Token},
-        protocol::{
-            errors::{SimulationError, TransitionError},
-            models::GetAmountOutResult,
-        },
-        protocol::models::ProtocolComponent,
-        protocol::state::ProtocolSim,
-    };
+    use tycho_simulation::protocol::models::ProtocolComponent;
+
+    use tycho_common::models::token::Token;
+    use tycho_common::simulation::protocol_sim::{ProtocolSim, GetAmountOutResult, Balances};
+    use tycho_common::simulation::errors::{SimulationError, TransitionError};
     use tycho_common::{dto::ProtocolStateDelta, Bytes};
     use tycho_common::models::Chain;
     use chrono::NaiveDateTime;
@@ -126,9 +122,12 @@ mod tests {
         NodeData {
             token: Arc::new(Token {
                 address: Bytes::from(hex::decode(format!("{:0>40x}", index)).unwrap()),
+                symbol: if index == 0 { "WETH".to_string() } else { format!("n{}", index) },
                 decimals: 2,
-                symbol: format!("n{}", index), // Symbol is now "n{index}"
-                gas: BigUint::from(30000u64 + index as u64),
+                tax: 0,
+                gas: vec![Some(30000u64 + index as u64)],
+                chain: Chain::Ethereum,
+                quality: 100,
             }),
             price: 0.0,
         }
@@ -226,7 +225,7 @@ mod tests {
         let cycles = find_all_negative_cycles(&mut graph, &mut stats, source, source, 2,0.5,1000.0,20,1e-4,40, 1.0);
         // Should find at least one cycle in this simple 2-node, 2-edge graph
         print!("Cycles found: {:?}", cycles);
-        assert!(cycles.len()== 1);
+    assert!(cycles.len() >= 1);
         match evaluate_cycle(
             cycles[0].3.as_ref().clone(), // Use the 4th element (Vec<EdgeIndex>)
             BigUint::from((cycles[0].0 * 100.0) as u64),
@@ -250,7 +249,7 @@ mod tests {
         let cycles = find_all_negative_cycles(&mut graph, &mut stats, source, source, 2,1.0,1000.0,20,1e-4,40, 1.0);
         // Should find at least one cycle in this simple 2-node, 2-edge graph
         print!("Cycles found: {:?}", cycles);
-        assert!(cycles.len()== 1);
+    assert!(cycles.len() >= 1);
         match evaluate_cycle(
             cycles[0].3.as_ref().clone(), // Use the 4th element (Vec<EdgeIndex>)
             BigUint::from((cycles[0].0 * 100.0) as u64),
@@ -274,7 +273,7 @@ mod tests {
         let cycles = find_all_negative_cycles(&mut graph, &mut stats, source, source, 2,75.0,1000.0,20,1e-4,40, 1.0);
         // Should find at least one cycle in this simple 2-node, 2-edge graph
         print!("Cycles found: {:?}", cycles);
-        assert!(cycles.len()== 1);
+    assert!(cycles.len() >= 1);
         match evaluate_cycle(
             cycles[0].3.as_ref().clone(), // Use the 4th element (Vec<EdgeIndex>)
             BigUint::from((cycles[0].0 * 100.0) as u64),

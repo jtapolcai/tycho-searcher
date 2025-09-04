@@ -1,8 +1,4 @@
-macro_rules! log_arb_info {
-    ($($arg:tt)*) => {
-        //println!("[ARB] {}", format_args!($($arg)*));
-    };
-}
+//use crate::log_arb_info;
 
 // STD
 use std::fs::File;

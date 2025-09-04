@@ -1,9 +1,5 @@
 // price_quoter.rs
-macro_rules! log_quoter_info {
-    ($($arg:tt)*) => {
-        //println!("[POOL] {}", format_args!($($arg)*));
-    };
-}
+use crate::log_quoter_info;
 
 use std::{
     collections::BTreeMap,
@@ -165,8 +161,8 @@ impl EdgeData {
                 stats.quoter += 1;
                 let amount_out_f64 = out.amount.to_f64().unwrap_or(0.0) / 10f64.powi(token_out.decimals as i32);
                 let amount_in_f64 = amount_in.to_f64().unwrap_or(0.0) / 10f64.powi(token_in.decimals as i32);
-                let _price = if amount_out_f64 != 0.0 { amount_in_f64 / amount_out_f64 } else { 0.0 };
-                let _gas_f64 = out.gas.to_f64().unwrap_or(0.0) / 10f64.powi(9);
+                let price = if amount_out_f64 != 0.0 { amount_in_f64 / amount_out_f64 } else { 0.0 };
+                let gas_f64 = out.gas.to_f64().unwrap_or(0.0) / 10f64.powi(9);
                 log_quoter_info!(
                     "Computed amount_out for {} → {} @ {}: {} (price: {}, gas: {})",
                     token_in.symbol, token_out.symbol, self.address(),
@@ -213,7 +209,7 @@ impl EdgeData {
             Ok(out) => {
                 stats.quoter += 1;
                 let amount_out_f64 = out.amount.to_f64().unwrap_or(0.0) / 10f64.powi(target.token.decimals as i32);
-                let _price = if amount_out_f64 != 0.0 { amount_in_f64 / amount_out_f64 } else { 0.0 };
+                let price = if amount_out_f64 != 0.0 { amount_in_f64 / amount_out_f64 } else { 0.0 };
                 let gas_f64 = out.gas.to_f64().unwrap_or(0.0) / 10f64.powi(9);
                 // let amount_out_without_gas = amount_out_f64 * 0.0f64.max((swap_amount - gas_f64) / swap_amount);
                 // let amount_out_without_gas_big_uint = BigUint::from(
@@ -267,7 +263,7 @@ impl EdgeData {
     }
 
 
-    fn handle_compute_error(&self, err: impl std::fmt::Display, _token_in: &Token, _token_out: &Token, stats: &mut Statistics) {
+    fn handle_compute_error(&self, err: impl std::fmt::Display, token_in: &Token, token_out: &Token, stats: &mut Statistics) {
         let error_text = err.to_string();
         if error_text.contains("No liquidity") {
             stats.quoter_failed_no_liquidity += 1;
@@ -428,7 +424,7 @@ impl EdgeData {
 
             // Linear interpolation at xm
             let y_interp = y0.0 + (y1.0 - y0.0) * ((xm - x0) / (x1 - x0));
-            let denom = ym.abs().max(1e-9);  // védelem kis értékek ellen
+            let denom = ym.abs().max(1e-9);  // protection against tiny values
             let rel_error = ((ym - y_interp) / denom).abs();
 
             if rel_error > tolerance && (x1 / x0 > 1.01) {

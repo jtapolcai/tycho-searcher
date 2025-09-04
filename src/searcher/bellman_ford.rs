@@ -1,37 +1,5 @@
 // bellman_ford.rs
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::rc::Rc;
-
-lazy_static::lazy_static! {
-    static ref LOG_FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
-    static ref LOGGING_ENABLED: AtomicBool = AtomicBool::new(false);
-}
-
-#[allow(dead_code)]
-fn get_log_file() -> Result<std::sync::MutexGuard<'static, Option<std::fs::File>>, std::sync::PoisonError<std::sync::MutexGuard<'static, Option<std::fs::File>>>> {
-    let mut guard = LOG_FILE.lock()?;
-    if guard.is_none() {
-        *guard = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("log.txt")
-            .ok();
-    }
-    Ok(guard)
-}
-
-pub fn enable_logging() {
-    LOGGING_ENABLED.store(true, Ordering::Relaxed);
-}
-
-pub fn disable_logging() {
-    LOGGING_ENABLED.store(false, Ordering::Relaxed);
-}
-
-pub fn is_logging_enabled() -> bool {
-    LOGGING_ENABLED.load(Ordering::Relaxed)
-}
 
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
@@ -50,23 +18,6 @@ use std::collections::{HashSet, HashMap};
 use tycho_common::{
     simulation::protocol_sim::ProtocolSim,
 };
-
-// pub struct CycleSearch {
-//     graph: &mut Graph<NodeData, RefCell<EdgeData>, Directed>,
-//     stats: &mut Statistics,
-//     source: NodeIndex,
-//     target: NodeIndex,
-//     max_iterations: usize,
-//     amount_in_min: f64,
-//     amount_in_max: f64,
-//     max_outer_iterations: usize,
-//     gss_tolerance: f64,
-//     gss_max_iter: usize,
-//     gas_price: f64,
-//     // the reselts are tuples: amount_in, gas, cycle, the path from start node, and the path to target node 
-//     cycles: mut Vec<(f64, f64, Vec<EdgeIndex>, Option<Vec<EdgeIndex>>, Option<Vec<EdgeIndex>>)>, 
-// }
-
 
 pub fn find_all_negative_cycles(
     graph: &mut Graph<NodeData, RefCell<EdgeData>, Directed>,
@@ -149,8 +100,9 @@ pub fn find_all_negative_cycles(
                 tabu_cycles.insert(Rc::clone(&cycle_rc));
                 continue;
             }
-            let (best_x, best_profit, best_gas) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                optimize_cycle_gss(
+            // Use GSS with gas fee to find optimal input amount
+            let gss_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                golden_section_search_with_gas(
                     &cycle,
                     graph,
                     source,
@@ -167,13 +119,19 @@ pub fn find_all_negative_cycles(
                     continue;
                 }
             };
-            if best_profit > 0.0 {
-                let amount_out = best_x + best_profit + best_gas*gas_price;
-                best_cycles.push((best_x, amount_out, best_gas, Rc::clone(&cycle_rc)));
+
+            if let Some((best_x, amount_out, total_gas_units, best_profit)) = gss_result {
+                if best_profit > 0.0 {
+                    // Keep gas as units to be consistent with non-optimized entries
+                    best_cycles.push((best_x, amount_out, total_gas_units, Rc::clone(&cycle_rc)));
+                }
+                tabu_cycles.insert(Rc::clone(&cycle_rc));
+                _last_best_x = Some(best_x);
+                _last_cycle = Some(Rc::clone(&cycle_rc));
+            } else {
+                tabu_cycles.insert(Rc::clone(&cycle_rc));
+                continue;
             }
-            tabu_cycles.insert(Rc::clone(&cycle_rc));
-            _last_best_x = Some(best_x);
-            _last_cycle = Some(Rc::clone(&cycle_rc));
         }
         if cycles.iter().all(|(_, _, _, c)| tabu_cycles.iter().any(|rc| rc.as_ref() == c)) {
             break;
@@ -299,18 +257,18 @@ pub fn find_all_negative_cycles_amount(
                     let total_gas=price_data.gas + distance[from_idx].gas.clone();
                     let total_gas_f64= total_gas.to_f64().unwrap_or(0.0); // Keep as gas units
                     let total_gas_cost_eth = total_gas_f64 * gas_price * 1e-9; // Convert to eth for profit calculation
-                    // Gas költség kiszámítása: gas_units * gas_price (gwei-ben)
+                    // Gas cost calculation: gas_units * gas_price (in gwei)
                     if profit_f64 > max_profit_without_gas{
                         max_profit_without_gas=profit_f64;
                     }
                     if profit_f64 - total_gas_cost_eth > max_profit_with_gas {
                         max_profit_with_gas = profit_f64 - total_gas_cost_eth;
                     }
-                    // Profitábilis csak akkor, ha a profit nagyobb mint a gas költség
+                    // Profitable only if the profit is greater than the gas cost
                     if profit_f64 > total_gas_cost_eth {
                         let path = get_path(edge_idx, source, graph, &predecessor);
                         
-                        // Kiszámítjuk az amount_out értékét a ciklus végén
+                        // Compute the amount_out at the end of the cycle
                         let amount_out_f64 = profit_f64 + start_token_amount;
                         
                         cycles.push((start_token_amount, amount_out_f64, total_gas_f64, path));
@@ -335,18 +293,18 @@ pub fn find_all_negative_cycles_amount(
                     let total_gas=price_data.gas + distance_with_loop[from_idx].gas.clone(); // Fix: use distance_with_loop
                     let total_gas_f64= total_gas.to_f64().unwrap_or(0.0); // Keep as gas units
                     let total_gas_cost_eth = total_gas_f64 * gas_price * 1e-9; // Convert to eth for profit calculation
-                    // Gas költség kiszámítása: gas_units * gas_price (gwei-ben)
+                    // Gas cost calculation: gas_units * gas_price (in gwei)
                     if profit_f64 > max_profit_without_gas{
                         max_profit_without_gas=profit_f64;
                     }
                     if profit_f64 - total_gas_cost_eth > max_profit_with_gas {
                         max_profit_with_gas = profit_f64 - total_gas_cost_eth;
                     }
-                    // Profitábilis csak akkor, ha a profit nagyobb mint a gas költség
+                    // Profitable only if the profit is greater than the gas cost
                     if profit_f64 > total_gas_cost_eth {
                         let path = get_path_with_loop(edge_idx, source, graph, &predecessor, &predecessor_with_loop);
                         
-                        // Kiszámítjuk az amount_out értékét a ciklus végén
+                        // Compute the amount_out at the end of the cycle
                         let amount_out_f64 = profit_f64 + start_token_amount;
                         
                         cycles.push((start_token_amount, amount_out_f64, total_gas_f64, path.clone()));
@@ -442,7 +400,7 @@ pub fn bellman_ford_initialize_relax(
     (distance, predecessor, distance_with_loop, predecessor_with_loop)
 }
 
-// Javított has_node_in_path függvény
+// Improved has_node_in_path function
 pub fn has_node_in_path(
     start: usize, 
     from_idx: usize, 
@@ -455,30 +413,30 @@ pub fn has_node_in_path(
     let mut visited = std::collections::HashSet::new();
     
     loop {
-        // Ciklus detektálás - ha már jártunk itt
+    // Cycle detection — if we've already visited here
         if visited.contains(&idx_node) {
             return true;
         }
         visited.insert(idx_node);
         
-        // Ha elértük a célpontot
+    // If we reached the target
         if idx_node == start {
             return true;
         }
         
-        // Predecessor keresése
+    // Find predecessor
         let edge_index = match predecessor[idx_node] {
             Some(e) => e,
             None => {
-                return false; // Nincs út
+                return false; // No path
             }
         };
         
-        // Következő node
+    // Next node
         let (ancestor, to_node) = graph.edge_endpoints(edge_index).unwrap();
         let ancestor_idx = graph.to_index(ancestor);
         
-        // Ellenőrizzük, hogy az él valóban a current node-ba mutat
+    // Verify that the edge indeed points to the current node
         let to_idx = graph.to_index(to_node);
         if to_idx != idx_node {
             return false;
@@ -486,15 +444,15 @@ pub fn has_node_in_path(
         
         idx_node = ancestor_idx;
         
-        // Timeout védelem
+    // Timeout protection
         counter -= 1;
         if counter <= 0 {
-            return true; // Konzervatív: ciklusnak tekintjük
+            return true; // Conservative: treat as a cycle
         }
     }
 } 
 
-// Teljesen újraírt get_path_with_loop függvény
+// Completely rewritten get_path_with_loop function
 pub fn get_path_with_loop(
     edge_idx_: EdgeIndex,
     source: NodeIndex,
@@ -507,7 +465,7 @@ pub fn get_path_with_loop(
     let mut current_edge = edge_idx_;
     let mut visited_nodes = std::collections::HashSet::new();
     let mut phase = 1;
-    let max_steps = 100; // Biztonságos felső határ
+    let max_steps = 100; // Safe upper bound
     
     loop {
         path.push(current_edge);
@@ -519,21 +477,21 @@ pub fn get_path_with_loop(
             }
         };
         
-        // Ha elértük a source-t, kész vagyunk
+    // If we reached the source, we're done
         if from_node == source {
             break;
         }
         
         let from_idx = graph.to_index(from_node);
         
-        // Fázis váltás: ha már láttuk ezt a node-ot, váltunk predecessor-ra
+    // Phase switch: if this node was already seen, switch to predecessor
         if visited_nodes.contains(&from_node) && phase == 1 {
             phase = 2;
         }
         
         visited_nodes.insert(from_node);
         
-        // Következő él kiválasztása fázis szerint
+    // Choose the next edge based on the current phase
         let next_edge = if phase == 1 {
             predecessor_with_loop[from_idx]
         } else {
@@ -545,7 +503,7 @@ pub fn get_path_with_loop(
                 current_edge = edge;
             }
             None => {
-                // Ha phase 1-ben nincs predecessor_with_loop, próbáljuk a regular-t
+                // If in phase 1 there is no predecessor_with_loop, try the regular predecessor
                 if phase == 1 {
                     if let Some(fallback_edge) = predecessor[from_idx] {
                         current_edge = fallback_edge;
@@ -566,7 +524,7 @@ pub fn get_path_with_loop(
     return path;
 }
 
-// Javított get_path függvény is
+// Improved get_path function as well
 pub fn get_path(
     edge_idx_: EdgeIndex,
     till: NodeIndex,
@@ -589,18 +547,18 @@ pub fn get_path(
             }
         };
         
-        // Célpont elérése
+    // Target reached
         if from_node == till {
             break;
         }
         
-        // Ciklus detektálás
+    // Cycle detection
         if visited_nodes.contains(&from_node) {
             break;
         }
         visited_nodes.insert(from_node);
         
-        // Következő él
+    // Next edge
         let from_idx = graph.to_index(from_node);
         match predecessor[from_idx] {
             Some(edge) => {
@@ -660,238 +618,123 @@ pub fn describe_path(
     result
 }
 
-fn golden_section_search<F>(
-    mut a: f64,
-    mut b: f64,
-    tol: f64,
-    max_iter: usize,
-    mut f: F,
-) -> (f64, f64)
-where
-    F: FnMut(f64) -> f64,
-{
-    // Ellenőrizzük, hogy a és b értékek validak-e
-    let fa = f(a);
-    let fb = f(b);
-    
-    // Ha mindkét végpont hibás, visszatérünk a középértékkel
-    if fa == f64::MIN && fb == f64::MIN {
-        println!("Both endpoints failed, trying midpoint");
-        let mid = (a + b) / 2.0;
-        let fmid = f(mid);
-        if fmid != f64::MIN {
-            return (mid, fmid);
+
+// Evaluate profit for a given cycle and input amount. Returns (is_profitable, amount_in, amount_out, total_gas_units, net_profit_in_start_token)
+fn evaluate_cycle_profit(
+    cycle: &[EdgeIndex],
+    graph: &mut Graph<NodeData, RefCell<EdgeData>, Directed>,
+    source: NodeIndex,
+    amount_in: f64,
+    gas_price_in_start_token: f64,
+) -> (bool, f64, f64, f64, f64) {
+    if cycle.is_empty() {
+        return (false, 0.0, 0.0, 0.0, 0.0);
+    }
+
+    let from_node_data = graph.node_weight(source).unwrap();
+    let decimals = from_node_data.token.decimals as u32;
+    let multiplier = 10f64.powi(decimals as i32);
+
+    let mut current_amount = (amount_in * multiplier).to_biguint().unwrap_or_default();
+    let mut total_gas = BigUint::zero();
+
+    let mut current_node = source;
+    for &edge_idx in cycle {
+        let (from, to) = graph.edge_endpoints(edge_idx).unwrap();
+        if from != current_node { return (false, 0.0, 0.0, 0.0, 0.0); }
+        let token_in = &graph.node_weight(from).unwrap().token;
+        let token_out = &graph.node_weight(to).unwrap().token;
+        let edge = graph.edge_weight(edge_idx).unwrap();
+        if let Some(price_data) = edge.borrow().quoter_amount_out(token_in, token_out, &current_amount, &mut Statistics::default()) {
+            current_amount = price_data.amount_out;
+            total_gas += price_data.gas;
+            current_node = to;
         } else {
-            println!("All evaluation points failed, returning zero profit");
-            return (a, 0.0);
-        }
-    }
-    
-    // Ha csak az egyik végpont hibás, szűkítsük a tartományt
-    if fa == f64::MIN {
-        println!("Lower bound failed, adjusting range");
-        a = a + (b - a) * 0.1; // 10%-kal beljebb
-        let fa_new = f(a);
-        if fa_new == f64::MIN {
-            // Ha még mindig hibás, próbáljuk a felső tartományt
-            return golden_section_search(b * 0.5, b, tol, max_iter, f);
-        }
-    }
-    
-    if fb == f64::MIN {
-        println!("Upper bound failed, adjusting range");
-        b = b - (b - a) * 0.1; // 10%-kal beljebb
-        let fb_new = f(b);
-        if fb_new == f64::MIN {
-            // Ha még mindig hibás, próbáljuk az alsó tartományt
-            return golden_section_search(a, a + (b - a) * 0.5, tol, max_iter, f);
+            return (false, 0.0, 0.0, 0.0, 0.0);
         }
     }
 
-    let gr = (5f64.sqrt() + 1.0) / 2.0;
-    let mut c = b - (b - a) / gr;
-    let mut d = a + (b - a) / gr;
-    let mut fc = f(c);
-    let mut fd = f(d);
-
-    // Ha a belső pontok is hibásak, próbáljunk kisebb tartományt
-    if fc == f64::MIN && fd == f64::MIN {
-        println!("Inner points failed, trying smaller range");
-        let mid = (a + b) / 2.0;
-        let quarter = (b - a) / 4.0;
-        return golden_section_search(mid - quarter, mid + quarter, tol, max_iter / 2, f);
-    }
-
-    for i in 0..max_iter {
-        if (b - a).abs() < tol {
-            break;
-        }
-        
-        if fc == f64::MIN {
-            // Ha c pont hibás, újra számoljuk
-            c = b - (b - a) / gr;
-            fc = f(c);
-            if fc == f64::MIN {
-                println!("Point c failed at iteration {}, stopping", i);
-                break;
-            }
-        }
-        
-        if fd == f64::MIN {
-            // Ha d pont hibás, újra számoljuk
-            d = a + (b - a) / gr;
-            fd = f(d);
-            if fd == f64::MIN {
-                println!("Point d failed at iteration {}, stopping", i);
-                break;
-            }
-        }
-        
-        if fc > fd {
-            b = d;
-            d = c;
-            fd = fc;
-            c = b - (b - a) / gr;
-            fc = f(c);
-        } else {
-            a = c;
-            c = d;
-            fc = fd;
-            d = a + (b - a) / gr;
-            fd = f(d);
-        }
-    }
-    
-    // Visszatérünk a jobb értékkel
-    if fc != f64::MIN && fd != f64::MIN {
-        if fc > fd {
-            (c, fc)
-        } else {
-            (d, fd)
-        }
-    } else if fc != f64::MIN {
-        (c, fc)
-    } else if fd != f64::MIN {
-        (d, fd)
-    } else {
-        println!("All points failed, returning midpoint with zero profit");
-        ((a + b) / 2.0, 0.0)
-    }
+    let amount_out = current_amount.to_f64().unwrap_or(0.0) / multiplier;
+    let profit = amount_out - amount_in;
+    let total_gas_f64 = total_gas.to_f64().unwrap_or(0.0);
+    let gas_cost_in_start = total_gas_f64 * gas_price_in_start_token * 1e-9;
+    let flashloan_fee = amount_in * 0.0005; // AAVE V3 0.05%
+    let net_profit = profit - (gas_cost_in_start + flashloan_fee);
+    (net_profit > 0.0, amount_in, amount_out, total_gas_f64, net_profit)
 }
 
-fn optimize_cycle_gss(
-    cycle: &Vec<EdgeIndex>,
+// Golden-section search over input amount including gas fee. Returns Some(best_amount_in, amount_out, total_gas_units, net_profit) if profitable
+fn golden_section_search_with_gas(
+    cycle: &[EdgeIndex],
     graph: &mut Graph<NodeData, RefCell<EdgeData>, Directed>,
     source: NodeIndex,
     amount_in_min: f64,
     amount_in_max: f64,
     gss_tolerance: f64,
     gss_max_iter: usize,
-    gas_price: f64
-) -> (f64, f64, f64) { // (best_x, best_profit, total_gas)
-    if cycle.is_empty() {
-        println!("Cycle is empty, returning zero profit");
-        return (amount_in_min, 0.0, 0.0);
-    }
-    
-    let (start_node, _) = match graph.edge_endpoints(cycle[0]) {
-        Some(endpoints) => endpoints,
-        None => {
-            println!("Invalid edge in cycle, returning zero profit");
-            return (amount_in_min, 0.0, 0.0);
-        }
-    };
-    
-    if start_node != source {
-        println!("Cycle does not start at source node, returning zero profit");
-        return (amount_in_min, 0.0, 0.0);
-    }
-    
-    let from_node_data = graph.node_weight(source).unwrap();
-    let decimals = from_node_data.token.decimals as u32;
-    let multiplier = 10f64.powi(decimals as i32);
+    gas_price_in_start_node_token: f64
+) -> Option<(f64, f64, f64, f64)> {
+    // 0) Find a minimal input that at least covers gas cost
+    let mut min_in = amount_in_min.max(1e-12); // avoid zero
+    let tolerance = 1e-9;
+    let max_iter = 20;
+    let mut prev_min_in = min_in;
 
-    // Adaptív tartomány keresés - ha a teljes tartomány hibás, szűkítsük
-    let mut current_min = amount_in_min;
-    let mut current_max = amount_in_max;
-    
-    // Először teszteljük néhány pontot a tartományban
-    let test_points = vec![
-        current_min,
-        current_min + (current_max - current_min) * 0.1,
-        current_min + (current_max - current_min) * 0.5,
-        current_min + (current_max - current_min) * 0.9,
-        current_max
-    ];
-    
-    let mut valid_points = Vec::new();
-    
-    for &test_point in &test_points {
-        let amount_start = (test_point * multiplier).to_biguint().unwrap_or(BigUint::zero());
-        match evaluate_cycle(cycle.clone(), amount_start, graph, source) {
-            Ok((amount, total_gas)) => {
-                let y = amount.to_f64().unwrap_or(0.0) / multiplier;
-                let gas = total_gas.to_f64().unwrap_or(0.0) * gas_price * 1e-9;
-                let profit = y - test_point - gas;
-                valid_points.push((test_point, profit));
-                println!("Test point {} -> profit: {}", test_point, profit);
-            }
-            Err(_e) => {
-                println!("Test point {} failed: {}", test_point, _e);
-            }
-        }
-    }
-    
-    if valid_points.is_empty() {
-        println!("No valid points found in range [{}, {}], returning zero", current_min, current_max);
-        return (current_min, 0.0, 0.0);
-    }
-    
-    // Szűkítsük a tartományt a valid pontok alapján
-    let min_valid = valid_points.iter().map(|(x, _)| *x).min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
-    let max_valid = valid_points.iter().map(|(x, _)| *x).max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
-    
-    current_min = min_valid;
-    current_max = max_valid;
-    
-    println!("Adjusted range for GSS: [{}, {}] with {} valid points", current_min, current_max, valid_points.len());
+    for _ in 0..max_iter {
+        let (_profitable, _ain, aout, total_gas, _profit) =
+            evaluate_cycle_profit(cycle, graph, source, min_in, gas_price_in_start_node_token);
+        let gas_cost_in_start = total_gas * gas_price_in_start_node_token * 1e-9;
+        let total_cost = gas_cost_in_start;
 
-    let (best_x, best_profit) = golden_section_search(
-        current_min,
-        current_max,
-        gss_tolerance,
-        gss_max_iter,
-        |x| {
-            let amount_start = (x * multiplier).to_biguint().unwrap_or(BigUint::zero());
-            match evaluate_cycle(cycle.clone(), amount_start, graph, source) {
-                Ok((amount, total_gas)) => {
-                    let y = amount.to_f64().unwrap_or(0.0) / multiplier;
-                    let gas = total_gas.to_f64().unwrap_or(0.0) * gas_price * 1e-9;
-                    let profit = y - x - gas;
-                    println!(
-                        "Evaluating cycle with amount_start: {} -> {} (-gas {}) profit: {}",
-                        x, y, gas, profit
-                    );
-                    profit
-                }
-                Err(_e) => {
-                    println!("Cycle evaluation failed for amount {}: {}", x, _e);
-                    f64::MIN // Hibás értékek esetén MIN értéket visszaadunk
-                }
-            }
-        },
-    );
-    
-    // Kiszámítjuk a gas költséget a legjobb x értékre
-    let best_gas = {
-        let amount_start = (best_x * multiplier).to_biguint().unwrap_or(BigUint::zero());
-        match evaluate_cycle(cycle.clone(), amount_start, graph, source) {
-            Ok((_amount, total_gas)) => {
-                total_gas.to_f64().unwrap_or(0.0) * gas_price * 1e-9
-            }
-            Err(_) => 0.0
+        if aout < min_in + total_cost {
+            // Linearly estimate how much to increase
+            let diff = (min_in + total_cost) - aout;
+            min_in += diff.max(min_in * 0.1); // increase at least 10% to converge faster
+        } else {
+            break;
         }
-    };
-    
-    (best_x, best_profit, best_gas)
+        let step = (min_in - prev_min_in).abs();
+        prev_min_in = min_in;
+        if step < tolerance { break; }
+    }
+
+    if min_in > amount_in_max { return None; }
+
+    // Golden section search starting from min_in
+    let mut a = min_in;
+    let mut b = amount_in_max;
+    let gr = (5.0f64.sqrt() - 1.0) / 2.0; // conjugate golden ratio
+
+    let mut x1 = a + (1.0 - gr) * (b - a);
+    let mut x2 = a + gr * (b - a);
+
+    let mut f1 = evaluate_cycle_profit(cycle, graph, source, x1, gas_price_in_start_node_token).4;
+    let mut f2 = evaluate_cycle_profit(cycle, graph, source, x2, gas_price_in_start_node_token).4;
+
+    for _ in 0..gss_max_iter {
+        if f1 > f2 {
+            b = x2;
+            x2 = x1;
+            f2 = f1;
+            x1 = a + (1.0 - gr) * (b - a);
+            f1 = evaluate_cycle_profit(cycle, graph, source, x1, gas_price_in_start_node_token).4;
+        } else {
+            a = x1;
+            x1 = x2;
+            f1 = f2;
+            x2 = a + gr * (b - a);
+            f2 = evaluate_cycle_profit(cycle, graph, source, x2, gas_price_in_start_node_token).4;
+        }
+        if (b - a).abs() < gss_tolerance { break; }
+    }
+
+    let best_amount = (a + b) / 2.0;
+    let (is_profitable, final_amount_in, final_amount_out, final_gas, final_profit) =
+        evaluate_cycle_profit(cycle, graph, source, best_amount, gas_price_in_start_node_token);
+    if is_profitable {
+        Some((final_amount_in, final_amount_out, final_gas, final_profit))
+    } else {
+        None
+    }
 }
+

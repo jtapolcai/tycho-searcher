@@ -38,6 +38,7 @@ use std::time::Instant;
 
 pub mod graph_types; // Contains NodeData, EdgeData, GraphError, etc.
 pub mod graph_components; // Contains GraphComponents and BCC logic
+pub mod logging; // Console logging toggle
 pub mod price_quoter;
 pub mod bellman_ford;
 pub mod arbitrage_save;
@@ -71,7 +72,7 @@ pub struct Searcher {
     blacklist_tokens: HashSet<Vec<u8>>,
     stats: Statistics,
     pub cli: crate::command_line_parameters::Cli, 
-    rpc_url: String, // Ethereum node URL a gas price lekérdezéshez
+    rpc_url: String, // Ethereum node URL for fetching gas price
 }
 
 impl Searcher {
@@ -79,7 +80,7 @@ impl Searcher {
         block_update_rx: Receiver<Update>,
         cli: crate::command_line_parameters::Cli,
         blacklist_tokens: HashSet<Vec<u8>>,
-        rpc_url: String, // Hozzáadott paraméter
+    rpc_url: String, // Added parameter
     ) -> Self {
         Self {
             rx: block_update_rx,
@@ -92,7 +93,7 @@ impl Searcher {
             blacklist_tokens,
             stats: Statistics::default(),
             cli,
-            rpc_url, // Új mező inicializálása
+            rpc_url, // Initialize new field
         }
     }
 
@@ -430,8 +431,7 @@ impl Searcher {
                             gas_price, 
                         );
                         if graph_component.node_count() >= 5 || !first_run {
-                            let duration = start_timer.elapsed();
-                             //println!("Runtime of the cycle search: {:?} in componenet {}", duration, comp_id);
+                            println!("Runtime of the cycle search: {:?} in componenet {}", start_timer.elapsed(), comp_id);
                             if self.stats.quoter>100{
                                 self.stats.print();
                                 self.stats.reset();
@@ -442,10 +442,10 @@ impl Searcher {
                                  //println!("Component {}: No negative cycle from: {}", comp_id, start_token_name.unwrap_or("N/A".to_string()));
                             }
                         } else {
-                            for (cycle_amount_in, cycle_amount_out, cycle_total_gas, cycle) in cycles {
+                            for (cycle_amount_in, _cycle_amount_out, _cycle_total_gas, cycle) in cycles {
                                 //println!("---- Negative cycle detected  -----");
                                 let cycle_clone = cycle.clone();
-                                // A verify_arbitrage_opportunity hívás után, ahol elküldöd a job-ot
+                                // After calling verify_arbitrage_opportunity, where you submit the job
                                 if let Some((_tokens, _pools, _amount_in, _amounts_out, _profit_in_microeth, _total_gas, _profit_without_gas_in_microeth)) =
                                     verify_arbitrage_opportunity(
                                         cycle_clone.as_ref().clone(),
