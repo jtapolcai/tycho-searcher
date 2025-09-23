@@ -1,52 +1,155 @@
-# Tycho Searcher
-Demo of a tycho seacher algorithm
+# Tycho Searcher - DeFi Arbitrage Detection Engine
 
-Tycho Searcher is a high-performance, async Rust engine for real-time detection of arbitrage opportunities in decentralized exchange (DEX) graphs. It ingests live blockchain data, maintains a dynamic graph of token pools, and applies an optimized Bellman-Ford algorithm to find negative cycles (profitable arbitrage paths) with gas-aware profit optimization.
+Tycho Searcher is a high-performance arbitrage detection engine built with Rust and the [Tycho library](https://docs.propellerheads.xyz/tycho). This project demonstrates real-time arbitrage opportunity detection across multiple decentralized exchanges using advanced graph algorithms and gas-optimized profit calculations.
+
+ℹ️ **Project Background:** Built for exploring DeFi arbitrage opportunities with Tycho's real-time data streams. Join developers using Tycho in [tycho.build](https://t.me/+B4CNQwv7dgIyYTJl).
 
 ## Features
-- **Real-time DEX graph updates** from Tycho feed
-- **Efficient negative cycle detection** (arbitrage) using a modified Bellman-Ford
-- **Gas cost and slippage aware profit calculation**
-- **Golden section search** for optimal input sizing
-- **Robust, warning-free Rust codebase**
-- **Detailed LaTeX documentation** with diagrams and pseudo-code
 
-## Architecture & Algorithm
-- The Searcher receives block updates and pool state from a Tycho feed (see [tycho-simulation](https://github.com/propeller-heads/tycho-simulation)).
-- Each block triggers a graph update and arbitrage search:
-  1. **Graph update:** Pools/tokens are added/removed as needed.
-  2. **Component search:** For each connected component, Bellman-Ford is run from the start token.
-  3. **Negative cycle detection:** Cycles are reconstructed and filtered for profitability (gas included).
-  4. **Profit optimization:** For each cycle, a golden section search finds the most profitable input amount.
-- See `doc/Searcher_documentation.tex` for full algorithm details, diagrams, and pseudo-code.
+- **Real-time DEX Monitoring**: Connects to Tycho's live data feed for block-by-block pool state updates
+- **Graph-based Arbitrage Detection**: Builds token trading graphs to efficiently discover negative cycles (arbitrage opportunities)
+- **Gas-aware Profit Optimization**: Golden section search for optimal trade sizing considering gas costs and flashloan fees
+- **Multi-chain Support**: Works on Ethereum, Base, and Unichain networks
+- **Robust Bellman-Ford Implementation**: Modified algorithm with BigUint precision and cycle reconstruction
+- **Configurable Logging**: Separate toggles for pool quoter and arbitrage logs
 
-## Bellman-Ford Algorithm in Tycho Searcher
+## Architecture
 
-The Tycho Searcher uses a **modified Bellman-Ford algorithm** to detect negative cycles in a dynamic DEX graph, which correspond to profitable arbitrage opportunities.
+The system follows a modular architecture with clear separation of concerns:
 
-### Overview
-- **Purpose:** Find negative cycles (arbitrage loops) in a directed graph where nodes are tokens and edges are DEX pools with exchange rates.
-- **Edge Weights:** Calculated as the negative logarithm of the exchange rate, so a negative cycle means a product of rates > 1 (i.e., profit).
-- **Precision:** Uses `BigUint` for all token amounts to avoid overflow and rounding errors.
+```
+Tycho Stream → Graph Updates → Bellman-Ford → Cycle Detection → Profit Optimization
+```
 
-### Algorithm Steps
-1. **Initialization**
-   - Set the distance to all nodes as infinity, except the source node (set to zero).
-   - Set all predecessors to `None`.
-2. **Relaxation**
-   - For `|V|-1` iterations (where `|V|` is the number of nodes):
-     - For each edge `(u, v)`:
-       - If `distance[v] > distance[u] + weight(u, v)`:
-         - Update `distance[v] = distance[u] + weight(u, v)`
-         - Set `predecessor[v] = u`
-3. **Negative Cycle Detection**
-   - After relaxation, for each edge `(u, v)`:
-     - If `distance[v] > distance[u] + weight(u, v)`, a negative cycle exists.
-     - Reconstruct the cycle using the `predecessor` array.
-4. **Cycle Storage**
-   - Detected cycles are stored as `Rc<Vec<EdgeIndex>>` to avoid unnecessary cloning and memory usage.
-5. **Profit Optimization**
-   - For each cycle, a **golden section search** is performed to find the input amount that maximizes profit, taking gas costs into account.
+- **`src/searcher/`**: Core arbitrage detection logic and graph management
+- **`src/searcher/bellman_ford.rs`**: Modified Bellman-Ford algorithm for negative cycle detection
+- **`src/searcher/price_quoter.rs`**: Pool state simulation and price calculation
+- **`src/searcher/graph_components.rs`**: Connected component analysis
+- **`src/searcher/logging.rs`**: Centralized logging with category toggles
+
+## Algorithm Details
+
+### Bellman-Ford for Arbitrage Detection
+
+The core algorithm uses a **modified Bellman-Ford** to detect negative cycles in DEX graphs:
+
+1. **Graph Representation**: Tokens as nodes, pools as directed edges with exchange rates
+2. **Negative Cycles**: Correspond to profitable arbitrage opportunities  
+3. **Precision**: Uses `BigUint` for all calculations to avoid overflow and rounding errors
+4. **Gas Integration**: Incorporates gas costs and flashloan fees (0.05%) in profit calculations
+5. **Optimization**: Golden section search finds optimal input amounts for maximum profit
+
+### Key Optimizations
+
+- **Reference-counted cycles**: `Rc<Vec<EdgeIndex>>` to avoid unnecessary cloning
+- **Efficient graph traversal**: Reuses edge references and minimizes allocations
+- **Early termination**: Stops when no profitable cycles remain
+- **Component isolation**: Processes connected components independently
+
+## Quick Start
+
+### Prerequisites
+
+- Rust 1.70+ and Cargo
+- Tycho API access (use `TYCHO_URL` environment variable or default endpoints)
+
+### Setup
+
+1. Clone the repository:
+   ```bash
+   git clone <repository-url>
+   cd tycho-searcher
+   ```
+
+2. Set up environment:
+   ```bash
+   # Optional: Set custom Tycho endpoint
+   export TYCHO_URL=https://your-tycho-endpoint.com
+   ```
+
+3. Run the searcher:
+   ```bash
+   cargo run --release -- --chain ethereum --tvl-threshold 10.0
+   ```
+
+## Configuration
+
+### Command Line Options
+
+```bash
+# Core parameters
+--chain CHAIN                    # Target blockchain (ethereum, base, unichain)
+--tvl-threshold AMOUNT          # Minimum pool TVL threshold
+--start-token ADDRESS           # Starting token address (default: WETH)
+
+# Bellman-Ford parameters  
+--bf-max-iterations N           # Maximum relaxation iterations (default: 4)
+--bf-amount-in-min AMOUNT       # Minimum input amount (default: 0.001)
+--bf-amount-in-max AMOUNT       # Maximum input amount (default: 1000.0)
+--bf-gss-tolerance TOL          # Golden section search tolerance (default: 1e-4)
+--bf-gss-max-iter N            # GSS maximum iterations (default: 40)
+
+# Logging options
+--log                          # Enable all console logs
+--log-pool                     # Enable pool quoter logs only
+--log-arb                      # Enable arbitrage logs only
+--export-graph                 # Export graph to JSON files
+```
+
+### Advanced Usage
+
+Monitor Ethereum mainnet with detailed logging:
+```bash
+cargo run --release -- \
+  --chain ethereum \
+  --tvl-threshold 100.0 \
+  --bf-max-iterations 6 \
+  --log-arb \
+  --export-graph
+```
+
+Run on Base network with custom parameters:
+```bash
+cargo run --release -- \
+  --chain base \
+  --tvl-threshold 50.0 \
+  --bf-amount-in-max 500.0 \
+  --log
+```
+
+## Output and Monitoring
+
+The searcher provides detailed insights into the arbitrage detection process:
+
+### Console Output
+- Block updates and graph statistics
+- Component analysis with node/edge counts  
+- Cycle detection results and profit calculations
+- Golden section search optimization metrics
+- Performance timing for bottleneck identification
+
+### JSON Export (with `--export-graph`)
+- **`full_graph.json`**: Complete token trading graph
+- **`largest_component.json`**: Main connected component
+
+### Logging Categories
+- **[POOL]**: Pool state updates and quoter calculations
+- **[ARB]**: Arbitrage opportunities and profit optimization
+
+## Performance Notes
+
+The searcher includes several optimizations for production use:
+
+- **Efficient data structures**: Minimal cloning with reference counting
+- **Optimized graph operations**: Reused edge references and streamlined traversal
+- **Configurable search bounds**: Tune parameters based on market conditions
+- **Component isolation**: Parallel processing potential for large graphs
+
+For detailed algorithm explanations and mathematical foundations, see `doc/searcher_documentation.pdf`.
+
+## License
+
+This project is provided as-is for educational and research purposes.
 
 ### Pseudo-code
 ```rust

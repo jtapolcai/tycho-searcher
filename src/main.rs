@@ -62,13 +62,11 @@ async fn main() -> anyhow::Result<()> {
         rpc_url,
     );
 
-    // Enable/disable console logs for log_* macros
-    if cli.log {
-        println!("Console logging enabled (--log)");
-        crate::searcher::logging::enable();
-    } else {
-        crate::searcher::logging::disable();
-    }
+    // Console logging switches: --log is master; --log-pool and --log-arb control categories
+    let pool_on = cli.log || cli.log_pool;
+    let arb_on = cli.log || cli.log_arb;
+    if pool_on { println!("[LOG] POOL logs enabled"); crate::searcher::logging::enable_pool(); } else { crate::searcher::logging::disable_pool(); }
+    if arb_on  { println!("[LOG] ARB  logs enabled"); crate::searcher::logging::enable_arb(); } else { crate::searcher::logging::disable_arb(); }
 
     let searcher_task = tokio::spawn(async move {
         if let Err(e) = searcher.run().await {
@@ -92,9 +90,9 @@ async fn main() -> anyhow::Result<()> {
         println!("Loaded {} tokens", all_tokens.len());
 
         let tvl_filter = ComponentFilter::with_tvl_range(cli.tvl_threshold, cli.tvl_threshold);
-        println!("Building protocol stream...");
+        println!("Building protocol stream for TVL>={}ETH",cli.tvl_threshold);
         let mut protocol_stream =
-            register_exchanges(ProtocolStreamBuilder::new(&tycho_url, chain), &chain, tvl_filter, cli.all_pools)
+            register_exchanges(ProtocolStreamBuilder::new(&tycho_url, chain), &chain, tvl_filter, cli.uniswap_pools)
                 .auth_key(Some(tycho_api_key.clone()))
                 .skip_state_decode_failures(true)
                 .set_tokens(all_tokens)

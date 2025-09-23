@@ -1,6 +1,6 @@
 // === Tycho related ===
 //extern crate tycho_simulation;
-use tycho_simulation::tycho_client::feed::component_tracker::ComponentFilter;
+use tycho_simulation::{tycho_client::feed::component_tracker::ComponentFilter};
 use tycho_common::{models::Chain};
 use tycho_simulation::{
     evm::{
@@ -42,23 +42,12 @@ pub struct Cli {
     //#[arg(long, default_value = "0xdac17f958d2ee523a2206206994597c13d831ec7")] // USDT
     pub start_token: String,
 
-    #[arg(long, default_value = "0.0001")] // should be approximatelly the gass price in eth
-    //#[arg(long, default_value = "100.0")]
-    pub start_token_amount: f64,
-
-    #[arg(long, default_value = "0.0000000001")]
-    //#[arg(long, default_value = "0.00000000000039")]
-    pub start_token_price_in_eth: f64,
-
-    #[arg(long, default_value = "0.001")]
-    pub precision: f64,
-
     #[arg(long, default_value = "false")]
-    pub all_pools: bool,
+    pub uniswap_pools: bool,
 
     #[arg(long, default_value = "4")]
     pub bf_max_iterations: usize,
-    #[arg(long, default_value = "0.001")]
+    #[arg(long, default_value = "0.001")] // should be approximatelly the gass price in eth
     pub bf_amount_in_min: f64,
     #[arg(long, default_value = "1000.0")]
     pub bf_amount_in_max: f64,
@@ -68,15 +57,22 @@ pub struct Cli {
     pub bf_gss_tolerance: f64,
     #[arg(long, default_value = "40")]
     pub bf_gss_max_iter: usize,
-
-    #[arg(long, default_value = "100")]
-    pub slippage_in_microeth: u64,
-    #[arg(long, default_value = "false")]
-    pub try_real: bool,
     
-    /// Enable simple console logs from log_* macros
+    /// Enable all console logs (both POOL and ARB)
     #[arg(long, default_value = "false")]
     pub log: bool,
+
+    /// Enable POOL (quoter) logs printed by log_quoter_info!
+    #[arg(long, default_value = "false")]
+    pub log_pool: bool,
+
+    /// Enable ARB logs printed by log_arb_info!
+    #[arg(long, default_value = "false")]
+    pub log_arb: bool,
+
+    /// Export graph to JSON file after processing
+    #[arg(long, default_value = "false")]
+    pub export_graph: bool,
 }
 
 pub fn get_default_url(chain: &Chain) -> Option<String> {
@@ -115,9 +111,9 @@ pub fn register_exchanges(
     builder: ProtocolStreamBuilder,
     chain: &Chain,
     tvl_filter: ComponentFilter,
-    all_pools: bool
+    uniswap_pools: bool
 ) -> ProtocolStreamBuilder {
-    if all_pools {
+    if !uniswap_pools {
         register_all_exchanges(builder, chain, tvl_filter)
     } else {
         register_uniswap_exchanges(builder, chain, tvl_filter)

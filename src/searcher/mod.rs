@@ -1,4 +1,5 @@
 // src/solver/mod.rs
+use crate::log_arb_info;
 
 // STD
 use std::sync::Arc;
@@ -44,7 +45,7 @@ pub mod bellman_ford;
 pub mod arbitrage_save;
 // pub mod crate::execution::arbitrage_save_worker;
 
-use bellman_ford::{find_all_negative_cycles};
+use bellman_ford::{find_all_negative_cycles,describe_path};
 // Use types from graph_types module
 use graph_types::{NodeData, EdgeData, GraphError, graph_to_json, Statistics};
 // Import GraphComponents from graph_components module
@@ -159,22 +160,6 @@ impl Searcher {
         let _price_token_0 = self.graph.node_weight(node_index_token_0).map(|n| n.price).unwrap_or(0.0);
         let _price_token_1 = self.graph.node_weight(node_index_token_1).map(|n| n.price).unwrap_or(0.0);
 
-        // if price_token_1 > 0.0 && price_token_0 > 0.0 {
-        //     // Extract node data before mutable borrow
-        //     let node_data_0 = self.graph.node_weight(node_index_token_0).cloned();
-        //     let node_data_1 = self.graph.node_weight(node_index_token_1).cloned();
-        //     if let (Some(node_data_0), Some(node_data_1)) = (node_data_0, node_data_1) {
-        //         if let Some(edge_data) = self.graph.edge_weight_mut(idx) {
-        //             edge_data.query_points(
-        //                 &mut self.stats,
-        //                 self.price_precision,
-        //                 self.start_token_amount,
-        //                 &node_data_0,
-        //                 &node_data_1,
-        //             );
-        //         }
-        //     }
-        // }
         Ok(idx)
     }
 
@@ -268,13 +253,14 @@ impl Searcher {
                     //println!("Start token '{}' not found in the graph.", self.cli.start_token);
                 }
             }
+            println!("Graph now has {} nodes and {} edges", self.graph.node_count(), self.graph.edge_count());
             self.components = GraphComponents::build(self.graph.clone(), self.start_token_index); 
-            //println!("Graph components built with {} components.", self.components.graph_comps.len());
-            //println!("Largest component has {} nodes and {} edges.",
-            //    self.components.graph_comps.iter().map(|g| g.node_count()).max().unwrap_or(0),
-            //    self.components.graph_comps.iter().map(|g| g.edge_count()).max().unwrap_or(0));
+            println!("Graph components built with {} components.", self.components.graph_comps.len());
+            println!("Largest component has {} nodes and {} edges",
+                self.components.graph_comps.iter().map(|g| g.node_count()).max().unwrap_or(0),
+                self.components.graph_comps.iter().map(|g| g.edge_count()).max().unwrap_or(0));
             // Find the largest component by node count
-            if let Some((_idx, largest)) = self.components.graph_comps
+            if let Some((idx, largest)) = self.components.graph_comps
                 .iter()
                 .enumerate()
                 .max_by_key(|(_, g)| g.node_count())
@@ -283,15 +269,30 @@ impl Searcher {
                 //    largest.node_count(),
                 //    largest.edge_count()
                 //);
-                let json_string = graph_to_json(largest, &block_number)?;
-                if let Err(e) = std::fs::write("graph.json", json_string) {
-                    eprintln!("[WARNING] Failed to write graph.json: {}", e);
-                } else {
-                    //println!("Largest component written to graph.json");
+                
+                // Only export to JSON if the CLI flag is enabled
+                if self.cli.export_graph {
+                    // Export full graph
+                    let full_graph_json = graph_to_json(&self.graph, &block_number)?;
+                    if let Err(e) = std::fs::write("full_graph.json", full_graph_json) {
+                        eprintln!("[WARNING] Failed to write full_graph.json: {}", e);
+                    } else {
+                        println!("Full graph written to full_graph.json ({} nodes, {} edges)", 
+                                self.graph.node_count(), self.graph.edge_count());
+                    }
+                    
+                    // Export largest component
+                    let largest_json = graph_to_json(largest, &block_number)?;
+                    if let Err(e) = std::fs::write("largest_component.json", largest_json) {
+                        eprintln!("[WARNING] Failed to write largest_component.json: {}", e);
+                    } else {
+                        println!("Largest component (id:{}) written to largest_component.json ({} nodes, {} edges)", 
+                                idx, largest.node_count(), largest.edge_count());
+                    }
                 }
             }
         } else {
-            //println!("No changes in the graph, skipping update.");
+            println!("No changes in the graph, skipping update.");
         }
  
         let mut components_to_update = HashSet::new();
@@ -307,21 +308,6 @@ impl Searcher {
                     } else {
                         (None, None)
                     };
-
-                    // if let Some(edge) = self.graph.edge_weight_mut(edge_idx) {
-                    //     edge.state = Arc::new(state.clone());
-                    //     self.stats.update_pool += 1;
-                    //     if let (Some(node_data_0), Some(node_data_1)) = (node_data_0, node_data_1) {
-                    //         if edge.update_points(
-                    //             &mut self.stats,
-                    //             self.price_precision,
-                    //             &node_data_0,
-                    //             &node_data_1,
-                    //         ) {
-                    //             updated = true;
-                    //         }
-                    //     }
-                    // }
                     updated = true;
                 }
                 if updated {
@@ -364,11 +350,11 @@ impl Searcher {
                     25.0 // Default 25 gwei
                 }
             };
-            //println!("=== Processing new block {} (gas price is: {:.2} gwei)===", data.block_number, gas_price);
+            println!("=== Processing new block {} (gas price is: {:.2} gwei)===", data.block_number_or_timestamp, gas_price);
             
             // Periodic channel health check (every 10 blocks)
             // if data.block_number % 10 == 0 {
-            //     println!("Satistics of the channel between the searcher and executor thread: {}", self.get_channel_health());
+            //     println!("Statistics of the channel between the searcher and executor thread: {}", self.get_channel_health());
             // }
             
             let block_number = format!("block:{}", data.block_number_or_timestamp);
@@ -376,14 +362,14 @@ impl Searcher {
             match self.update_graph(&data) {
                 Ok(components_to_update) => {
                     if components_to_update.is_empty() {
-                        //println!("No components to update, skipping cycle detection.");
+                        println!("No components to update, skipping cycle detection.");
                         continue;
                     }
                     //println!("Components to update: {:?}", components_to_update);
                     for comp_id in components_to_update {
                         // Do something with each component id
                         if !first_run {
-                            //println!("Component {} is being updated", comp_id);
+                            println!("Component {} is being updated", comp_id);
                         }
                         let orig_start_index = self.start_token_index.unwrap_or_else(|| {
                             panic!("Start token index is not set, cannot find cycles.");
@@ -411,9 +397,9 @@ impl Searcher {
                             if let Err(e) = std::fs::write(&file_name, json_string) {
                                 eprintln!("[WARNING] Failed to write {}: {}", file_name, e);
                             } else {
-                                //println!("Graph component {} has {} nodes and {} edges (start node:{:?} {})", 
-                                //    file_name, graph_component.node_count(), graph_component.edge_count(),start_index, 
-                                //    graph_component.node_weight(start_index).map(|n| n.token.symbol.clone()).unwrap_or_else(|| "Unknown".to_string()));
+                                println!("Graph component {} has {} nodes and {} edges (start node:{:?} {})", 
+                                    file_name, graph_component.node_count(), graph_component.edge_count(),start_index, 
+                                    graph_component.node_weight(start_index).map(|n| n.token.symbol.clone()).unwrap_or_else(|| "Unknown".to_string()));
                             }
                         }
                         let start_timer = Instant::now();
@@ -431,7 +417,7 @@ impl Searcher {
                             gas_price, 
                         );
                         if graph_component.node_count() >= 5 || !first_run {
-                            println!("Runtime of the cycle search: {:?} in componenet {}", start_timer.elapsed(), comp_id);
+                            println!("Runtime of the cycle search: {:?} in component {} with nodes {}", start_timer.elapsed(), comp_id, graph_component.node_count());
                             if self.stats.quoter>100{
                                 self.stats.print();
                                 self.stats.reset();
@@ -443,29 +429,26 @@ impl Searcher {
                             }
                         } else {
                             for (cycle_amount_in, _cycle_amount_out, _cycle_total_gas, cycle) in cycles {
-                                //println!("---- Negative cycle detected  -----");
+                                log_arb_info!("---- Negative cycle detected  -----");
                                 let cycle_clone = cycle.clone();
                                 // After calling verify_arbitrage_opportunity, where you submit the job
-                                if let Some((_tokens, _pools, _amount_in, _amounts_out, _profit_in_microeth, _total_gas, _profit_without_gas_in_microeth)) =
+                                if let Some((_tokens, _pools, _amount_in, _amounts_out, profit_in_microeth, _total_gas, profit_without_gas_in_microeth)) =
                                     verify_arbitrage_opportunity(
                                         cycle_clone.as_ref().clone(),
                                         cycle_amount_in,
                                         start_token_name.clone().unwrap_or_else(|| "Unknown".to_string()),
                                         &graph_component,
                                         gas_price
-                                    )
-                                {
-                                
-                                    //println!("Try token {} {:.6} ({}) profit: {:.0} mikreETH (minus gas: {:.0} mikroETH) - TOO_NEGATIVE - SKIPPING", 
-                                    //    start_token_name.as_deref().unwrap_or("Unknown"), 
-                                    //    cycle_amount_in, 
-                                    //    describe_path(&graph_component, &cycle_clone), 
-                                    //    profit_in_microeth,
-                                    //    profit_without_gas_in_microeth
-                                    //);
-                                
+                                    ) {
+                                    log_arb_info!("Try token {} {:.6} ({}) profit: {:.0} mikreETH (minus gas: {:.0} mikroETH) - TOO_NEGATIVE - SKIPPING", 
+                                        start_token_name.as_deref().unwrap_or("Unknown"), 
+                                        cycle_amount_in, 
+                                        describe_path(&graph_component, &cycle_clone), 
+                                        profit_in_microeth,
+                                        profit_without_gas_in_microeth
+                                    );
                                 }
-                            }
+                            };
                         } 
                     }
                 }

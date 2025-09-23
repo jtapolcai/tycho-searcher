@@ -7,7 +7,11 @@
 \usepackage{enumitem}
 \usepackage[ruled,vlined]{algorithm2e}
 \usepackage{tikz}
+\usepackage{multirow}
+\usepackage{subfig}
+\usepackage[svgnames,table]{xcolor}
 \usetikzlibrary{arrows.meta}
+
 
 \title{Arbitrage Cycle Search Heuristic}
 \author{Project Tycho}
@@ -16,6 +20,17 @@
 \newcommand{\xin}{x_{\text{in}}}
 \newcommand{\yout}{y_{\text{out}}}
 
+\usetikzlibrary{shadows, arrows.meta,decorations.markings}
+\tikzset{
+  tokenstyle/.style={
+    rectangle,
+    rounded corners,
+    draw=black,
+    fill=white,
+    drop shadow,
+    font=\scriptsize,
+  }
+}
 
 \begin{document}
 
@@ -44,18 +59,19 @@ The code is written in rust. It uses asynchronous channels (\texttt{tokio::sync:
 
 \section{Modified Bellman-Ford Algorithm}
 \subsection{Purpose}
-The Bellman-Ford algorithm can detect negative cycles in a weighted graph. It has been adapted for arbitrage search, where the task is to find a cycle with positive profit in the exchange graph. In our adaptation, we consider that the internal state of an Automated Market Maker (AMM) changes after each exchange; therefore, we restrict arbitrage cycles to traverse each AMM at most once.
+The Bellman-Ford algorithm can detect negative cycles in a weighted graph. We have adapted it for arbitrage cycle searching, where the task is to find a cycle with positive profit in the exchange graph. We also consider that the internal state of an Automated Market Maker (AMM) changes after each exchange; therefore, we restrict arbitrage cycles to traverse each AMM at most once.
 
 \subsection{Data Structures}
 \begin{itemize}[leftmargin=*, label=--]
     \item \texttt{Graph}: A directed graph where nodes represent tokens and each edge corresponds to an AMM and represents the exchange rates between the corresponding tokens.
     \item \texttt{Edge Weights}: 
-Each edge is associated with two functions: $e(\xin)$ and $g(\xin)$. Here, $e(\xin)$ returns the amount of tokens received after the swap, $\yout$, while $g(\xin)$ returns the gas used, which is typically a constant function, since the gas cost is usually independent of $\xin$.
+Each edge $e$ is associated with two functions: $w_e(\xin)$ and $g_e(\xin)$. Here, $w_e(\xin)$ returns the amount of tokens received after the swap, $\yout$, while $g_e(\xin)$ returns the gas used, which is typically a constant function, since the gas cost is usually independent of $\xin$.
+\end{itemize}
 
-We assume that $e(\xin)$ is a monotone non-decreasing function; that is, increasing the input amount $\xin$ does not decrease the output amount $\yout$. Moreover, the exchange rate $\frac{\yout}{\xin}$ is a monotone non-increasing function of $\xin$.
+We assume that $w_e(\xin)$ is a monotone non-decreasing function; that is, increasing the input amount $\xin$ does not decrease the output amount $\yout$. Moreover, the exchange rate $\frac{\yout}{\xin}$ is a monotone non-increasing function of $\xin$.
 
 Each query to $e()$ incurs a computational cost — in practice, this is implemented via a Rust call to \texttt{get\_amount\_out}, which emulates the swap. Both $\xin$ and $\yout$ are stored as large integer values.
-\end{itemize}
+
 
 \begin{figure}
 \centering
@@ -68,7 +84,7 @@ Each query to $e()$ incurs a computational cost — in practice, this is impleme
 \draw[->] (C) -- node[left] {$e_3$} (A);
 \node[anchor=west, text width=65mm, align=left] at (5,0.8) {If the arbitrage cycle traverses tokens $A \rightarrow B \rightarrow C \rightarrow A$ then it is profitable if and only if 
 \begin{multline*}
-e_1(e_2(e_3(\xin))) - \xin > \\ p_A\cdot (e_1(\xin) + e_2(\xin) + e_3(\xin))
+w_3(w_2(w_1(\xin))) - \xin > \\ p_A\cdot (g_1(\xin) + g_2(\xin) + g_3(\xin))
 \end{multline*}
 };
 \end{tikzpicture}
@@ -84,31 +100,128 @@ The arbitrage cycle has two key performance metrics:
 \end{enumerate}
 
 Since gas is paid in Ether, determining whether an arbitrage is profitable requires knowing the price $p$ of the start token in ETH. If the start token is WETH, then $p = 1$.
+
+It is important to note that the function $e()$ changes after each swap; therefore, Fig. \ref{fig:arbcycle} only holds if the three edges belong to different AMMs. Therefore, for each edge we explicitly store the pool to which it belongs.
+
+\begin{itemize}[leftmargin=*, label=--]
+    \item \texttt{Pools}:  For each edge $e$ we store the associated pool $p(e)$. 
+\end{itemize}
+    
+We restrict the search space to cycles in which every edge belongs to a different pool; that is, for any cycle $C$ and any distinct edges $e,f \in C$, we require $p(e)\neq p(f)$. Although some studies do not impose this restriction on the problem space \cite{diamandis2024convex}, we found that in practice it has only a minimal impact on solution quality.
+
+\subsection{Precomupations}
+
+As a first step, we decompose the graph into connected components so that cycles can be searched independently within each component. This has several advantages: upon an update, only the affected components need to be recomputed, and the search is also easily parallelizable (though we did not implement parallelization in our prototype). 
+
+We select a starting node from which the search begins, typically the WETH token.
+As a first step, we consider the 2-edge-connected component of the graph that contains the start node. Tokens that are either unreachable from the start node through AMMs, or reachable only via a single AMM, are irrelevant for the purpose of cycle detection.
+Next, we remove this node from the graph and compute the connected components. After adding the starting node back to the graph, we yield subgraphs that are disjoint except for the starting node. It is easy to see that cycles can be searched independently in these subgraphs, because any cycle that would traverse multiple components could only cross via the starting node. In such a case, however, the cycle can be split into smaller cycles that each remain within a single component.
+
+Table \ref{table:graph} reports the graph size, the number of connected components, and the size of the largest component, as a function of the set of pools under consideration. The pools include Uniswap v2, v3, and v4, Ekubo v2, Balancer v2, and Curve. We further filter pools by their total value locked (TVL), measured in ether.
+The table shows that this step yields a significant speedup. For instance, in a graph with $2\,375$ nodes, the largest component contains only $367$ nodes, illustrating how special the structure of the graph is.
+
+See also Fig. \ref{fig:token_graph} showing the graph skeleton of the largest component, which is a simplified representation produced by first removing self-loops and iteratively pruning leaves (degree‑1 nodes), then collapsing degree‑2 chains into single edges marked as skeleton (and mark these edges as dashed lines). This preserves the graph for cycle search while suppressing peripheral noise and intermediate chain nodes for clearer visualization and analysis.
+
+
+\begin{table}
+\caption{Performance of the algorithm for pools of various minimum TVL values. }
+\label{table:graph}
+\centering
+\small
+\begin{tabular}{cr|rr|r|rr|r}
+\hline
+\multicolumn{2}{c|}{AMMs} &  \multicolumn{2}{c|}{full graph}& \#compo-& \multicolumn{2}{c|}{largest component} & runtime\\
+types&TVL &\#nodes&\#edges&nents&\#nodes&\#edges& \\
+\hline
+\multirow{3}{*}{\rotatebox{90}{\footnotesize
+  \parbox{1.2cm}{\centering Uniswap v2,3,4 Ekubo Balancer curve}}}
+&1000 & 111 & 322 & 54 & 47 & 190 & 4.2 s \\
+&100 & 623 & 1662 & 435 & 166 & 574 & 12 s \\
+&10 & 2467 & 6164 & 1980 & 462 &1924 & 21 s \\
+\hline
+\multirow{3}{*}{\rotatebox{90}{\footnotesize
+  \parbox{1.2cm}{\centering Uniswap v2, v3}}}
+&1000 & 78 & 202 & 42 & 26 & 90 & 40 ms \\
+&100 & 563 & 1324 & 420 & 126 & 398 & 271 ms \\
+&10 & 2375 & 5470 & 1973 & 367 & 1258 & 359 ms \\
+\end{tabular}
+\end{table}
+
+\begin{figure}
+\definecolor{prot_uniswap_v2}{HTML}{FF0000}  % protocol: uniswap_v2
+\definecolor{prot_uniswap_v3}{HTML}{0000FF}  % protocol: uniswap_v3
+\definecolor{prot_uniswap_v4}{HTML}{00AA00}  % protocol: uniswap_v4
+\definecolor{prot_balancer_v2}{HTML}{FF7700}  % protocol: vm:balancer_v2
+\definecolor{prot_curve}{HTML}{9900CC}  % protocol: vm:curve
+\subfloat[All pools]{
+\input{figures/graph_all_amm_tvl10.tex}
+} \\
+\subfloat[Uniswap v2 and v4 pools]{
+\input{figures/graph_uniswap_tvl10.tex}
+}
+\caption{The sceleton of the token graphs for pools with TVL$\geq10$ Ether, at 22nd of September 2025. Graph skeleton: the core network obtained by removing self-loops and peripheral leaves and collapsing chains of degree‑2 nodes into single (dashed) edges, so the backbone connectivity between hubs is emphasized.}\label{fig:token_graph}
+\end{figure}
+
+\subsection{Modified Belmann-Ford}
  
- For simplicity let's assume $\xin$ is given. Than we can define the following data structure 
+ Next we explain our most important subrutine. 
+In this subrutine we assume $\xin$ is given, and a subgraph $G=(V,E)$. The task is to find cycles such that are profitable without considering gas, i.e.  $w_3(w_2(w_1(\xin))) > \xin$ on Fig. \ref{fig:arbcycle}.  
+
+We define the following data structure 
  \begin{itemize}[leftmargin=*, label=--]
-    \item \texttt{Distances}: 
-For each node $v$, we store the maximum attainable output amount $\yout$ (denoted as $d_v$) and the corresponding path $P_v$ from the start node.
+    \item \texttt{Distance\_without\_loop}: 
+For each node $v$, we store the maximum attainable output amount $\yout$ (denoted as $d_v$) along a path that does not traverse the same node (token) more than one.
+    \item \texttt{Path\_without\_loop}: 
+For each node $v$, we store the path $P_v$ towards the start node corresponding to $d_v$.
+    \item \texttt{Distance\_with\_a\_single\_loop}: 
+For each node $v$, we store a second value, the maximum attainable output amount $\yout$ (denoted as $d^1_v$) along a path that  traverses one node (token) twice, all the others only once.
+    \item \texttt{Path\_with\_a\_single\_loop}: 
+For each node $v$, the corresponding path $P^1_v$ from the start node.
  %   To avoid unnecessary data copying, cycles found by the algorithm are stored as reference-counted vectors, reducing memory overhead and improving performance.
 \end{itemize}
 
-\subsection{Algorithm Steps}
+
 
 \begin{algorithm}[tb]
 \DontPrintSemicolon 
 \caption{Modified Belmman-Ford}\label{alg:MBF}
-\KwIn{Directed graph $G$, strat node $s$, amount $\xin$, price $p$}
+\KwIn{Directed graph $G$, strat node $s$, amount $\xin$, price $p$, max iteration $k_{\max}$}
 \nl $d_s=\xin$; $g_s=0$; $d_v=\infty$ and $g_v=0$ for $v\in V \setminus \{s\}$\\
-\nl \For{$j \in\{1,\dots, k\}$} {
+\nl \For{$j \in\{1,\dots, k_{\max}\}$} {
 \nl  \For{ $e_{u \rightarrow v} \in E$ }{
-\nl     \If{$d_u\neq \infty$} {
+\nl     \If{$d_u\neq \infty$ and pool of $e_{u \rightarrow v}$ is not in $P_u$} {
 \nl $d',g'=$ \texttt{extend\_path}$(d_u, g_u, P_u, e_{u \rightarrow v})$; \\
-\nl     \If{$v=s \And  d'>\xin + p \cdot g'$} {
-\nl            \texttt{save\_cycle}$(\xin, P_u + e_{u \rightarrow v})$;
-        }
-\nl     \If{$v\neq s \And d_v+p\cdot g_v> d'+p\cdot g'$} {
-\nl            $d_v =d'$;   $g_v =g'$;       $P_v = P_u + e_{u \rightarrow v}$;
-        }
+\nl       \eIf{$v\neq s$}{
+\nl         \eIf{token $v \in P_u$} {
+\nl            \If{$d^1_v+p\cdot g^1_v> d'+p\cdot g'$} {
+\nl               $d^1_v =d'$;   $g^1_v =g'$;       $P^1_v = P_u + e_{u \rightarrow v}$;\\
+\nl		  \texttt{save\_path}$(\xin, P_u + e_{u \rightarrow v})$;
+                 }
+              }{%else
+\nl             \If{$d_v+p\cdot g_v> d'+p\cdot g'$} {
+\nl               $d_v =d'$;   $g_v =g'$;       $P_v = P_u + e_{u \rightarrow v}$;        
+                }
+             }
+            }
+             {% else loop through s
+\nl            \If{$d'>\xin + p \cdot g'$} {
+\nl		  \texttt{save\_cycle}$(\xin, P_u + e_{u \rightarrow v})$;
+              }        
+            }
+          }
+\nl       \If{$d^1_u\neq \infty$ and pool of $e_{u \rightarrow v}$ is not in $P^1_u$} {
+\nl       $d',g'=$ \texttt{extend\_path}$(d^1_u, g^1_u, P^1_u, e_{u \rightarrow v})$; \\
+\nl       \eIf{$v\neq s$}{
+\nl       \If{token $v \notin P^1_u$} {
+\nl       \If{$d^1_v+p\cdot g^1_v> d'+p\cdot g'$} {
+\nl            $d^1_v =d'$;   $g^1_v =g'$;       $P^1_v = P^1_u + e_{u \rightarrow v}$;
+          }
+          }
+          }{% else loop through s
+\nl            \If{$d'>\xin + p \cdot g'$} {
+\nl		  \texttt{save\_cycle}$(\xin, P^1_u + e_{u \rightarrow v})$;
+              } 
+           }
         }
     }
 }
@@ -118,16 +231,38 @@ For each node $v$, we store the maximum attainable output amount $\yout$ (denote
 Algorithm \ref{alg:MBF} describes the pseudocode of the algorithm. It has following main steps:
 \begin{enumerate}[leftmargin=*, label=\arabic*.]
     \item Initialize distances from the source node to all other nodes as infinity, except the source itself (zero and empty path).
-    \item For each edge $u \rightarrow v$, if node $u$ has a finite distance (i.e., $d_u \neq \infty$), attempt to extend the path $P_u$ by adding the edge. If this results in more tokens than currently recorded at $d_v$, then update both $d_v$ and $P_v$. See function \texttt{extend\_path} for details.
-    
-    \item Repeat the previous step for $k$ iterations, where $k$ is the maximum allowed path length.
+    \item For each edge $u \rightarrow v$, if node $u$ has a finite distance (i.e., $d_u \neq \infty$), attempt to extend the path $P_u$ by adding the edge. See function \texttt{extend\_path} for details.
+    In our approach, this is allowed only if the pool of $e_{u \rightarrow v}$ has not previously been used in the path.
+    If this results in more tokens than currently recorded at $d_v$, then we need to update our data structures as follows: If the path $P_u$ dos not traverse token $v$, we update $d_v$ and $P_v$, otherwise we update  $d^1_v$ and $P^1_v$. In the later case we have found a path from $s$ and with a loop through $v$, which we save as a candidate. Finally, if node $v=s$, we have found a loop.
+    \item We perform a similar check if node $u$ has a finite distance with loop (i.e., $d_u \neq \infty$). In this case we don deal witht he case of having more loops.
+        \item Repeat the previous step for $k$ iterations, where $k$ is the maximum allowed path length.
     %\item After the main loop, check for negative cycles by verifying if any edge can still be relaxed. If so, reconstruct the cycle.
     %\item Store detected cycles as \texttt{Rc<Vec<EdgeIndex>>} to minimize cloning and memory usage.
 \end{enumerate}
 
-The function \texttt{extend\_path}$(d_u, g_u, P_u, e_{u \rightarrow v})$ returns the token amount and gas usage resulting from extending path $P_u$ with edge $e_{u \rightarrow v}$. It accounts for the case where the same AMM is traversed multiple times along $P_u + e_{u \rightarrow v}$, updating its internal state after each traversal.
+The function \texttt{extend\_path}$(d_u, g_u, P_u, e_{u \rightarrow v})$ returns the token amount and gas usage resulting from extending path $P_u$ with edge $e_{u \rightarrow v}$. Note that, it could handle the case where the same AMM is traversed multiple times along $P_u + e_{u \rightarrow v}$, updating its internal state after each traversal.
 
-The function \texttt{save\_cycle}$(\xin, P)$ saves a profitable arbitrage cycle with a given amount $\xin$. 
+The function \texttt{save\_cycle}$(\xin, P)$ saves a profitable arbitrage cycle with a given amount $\xin$. While the function 
+ \texttt{save\_path}$(\xin, P)$ saves a profitable path to a token, from which there is an arbitrage cycle. It also stores an amount $\xin$ from the start node. See Fig. \ref{fig:arb_path} for illustration.
+   
+\begin{figure}   
+\centering
+\begin{tikzpicture}[>=Latex,
+  dot/.style={circle,draw,fill=white,inner sep=1.2pt},
+  looparrow/.style={thick,postaction={decorate},
+    decoration={markings,
+      mark=at position 0.25 with {\arrow{Latex}},
+      mark=at position 0.75 with {\arrow{Latex}}}}]
+\node[dot,label=below:{$\xin$}] (s) at (0,0) {$s$};
+\node  (v) at (4,0) {};
+\draw[thick,-{Latex}] (s) -- (v);
+\draw[looparrow] (5,0) circle [radius=1cm];
+\node[dot, label=right:{$d_v < d^1_v$}]  at (v) {$v$};
+\end{tikzpicture}
+\caption{Illustration of an arbitrage path saved in  \texttt{save\_path}.}\label{fig:arb_path}
+\end{figure}
+
+
 
 \subsection{Arbitrage search}
 
@@ -147,131 +282,8 @@ To further reduce runtime, we implemented the following memory management strate
     \item \textbf{BigUint Arithmetic:} Ensures that all calculations are safe from overflow, which is critical for financial computations.
 \end{itemize}
 
-%\section{Example: Negative Cycle Detection}
-%\begin{lstlisting}[caption=Finding Negative Cycles]
-%// Pseudocode for negative cycle detection
-%for each node in graph {
-%    run bellman_ford from node
-%    if negative cycle found {
-%        store Rc<Vec<EdgeIndex>> for the cycle
-%    }
-%}
-%\end{lstlisting}
-%
-%\section{Algorithm Details}
-%
-%\subsection{High-Level searcher Flow}
-%Below is a high-level flowchart of the searcher's main loop:
-%
-%%\begin{verbatim}
-%%Mermaid flowchart (render with mermaid CLI or online)
-%%flowchart TD
-%%    A["Start: Receive Block Update"] --> B["Update Graph with New Pools/States"]
-%%    B --> C["For Each Component"]
-%%    C --> D["Run Bellman-Ford from Start Node"]
-%%    D --> E["Relax Edges for N Iterations"]
-%%    E --> F["Detect Negative Cycles"]
-%%    F --> G["For Each Cycle"]
-%%    G --> H["Optimize Input Amount (Golden Section Search)"]
-%%    H --> I{"Profit > 0?"}
-%%    I -- "Yes" --> J["Log/Export Arbitrage"]
-%%    I -- "No" --> K["Skip"]
-%%    J --> L["Wait for Next Block"]
-%%    K --> L
-%%    L --> A
-%%\end{verbatim}
-%
-%\subsection{Bellman-Ford Relaxation and Negative Cycle Detection}
-%
-%%\begin{verbatim}
-%%Mermaid flowchart (render with mermaid CLI or online)
-%%flowchart TD
-%%    subgraph BellmanFord["Bellman-Ford Relaxation Loop"]
-%%        B1["Initialize distances: ∞, source=0"]
-%%        B2["Repeat for |V|-1 iterations:"]
-%%        B3["  For each edge (u,v):"]
-%%        B4["    If d[v] > d[u] + w(u,v):"]
-%%        B5["      d[v] = d[u] + w(u,v)"]
-%%        B6["      pred[v] = u"]
-%%        B2 --> B3 --> B4 --> B5 --> B6
-%%    end
-%%    B1 --> B2
-%%    B6 --> C["Check for negative cycles"]
-%%    C --> D{"Any edge can still be relaxed?"}
-%%    D -- "Yes" --> E["Reconstruct cycle using pred[]"]
-%%    D -- "No" --> F["No negative cycle"]
-%%    E --> G["Store cycle as Rc<Vec<EdgeIndex>>"]
-%%    F --> H["Done"]
-%%    G --> H
-%%\end{verbatim}
-%
-%\subsection{Component Interaction Sequence}
-%
-%\begin{verbatim}
-%%% Mermaid sequence diagram (render with mermaid CLI or online)
-%sequenceDiagram
-%    participant S as searcher
-%    participant G as Graph
-%    participant B as BellmanFord
-%    participant O as Optimizer
-%    S->>G: Update with new block
-%    S->>B: Run Bellman-Ford
-%    B->>G: Relax edges
-%    B->>B: Repeat for N iterations
-%    B->>G: Check for negative cycles
-%    B-->>S: Return cycles
-%    S->>O: For each cycle, optimize input amount
-%    O-->>S: Return best amount, profit
-%    S->>S: If profit > 0, log/export arbitrage
-%    S->>S: Wait for next block
-%\end{verbatim}
-%
-%\subsection{Pseudo-code}
-%
-%\textbf{Main searcher Loop:}
-%\begin{lstlisting}[]
-%loop {
-%    receive block update;
-%    update graph with new pools/states;
-%    for each component in graph {
-%        run Bellman-Ford from start node;
-%        for each negative cycle found {
-%            optimize input amount (golden section search);
-%            if profit > 0 {
-%                log/export arbitrage;
-%            }
-%        }
-%    }
-%}
-%\end{lstlisting}
-%
-%\textbf{Bellman-Ford Relaxation:}
-%
-%
-%\textbf{Negative Cycle Detection:}
-%\begin{lstlisting}[]
-%for each edge (u, v) {
-%    if d[v] > d[u] + w(u, v) {
-%        // Negative cycle found
-%        reconstruct cycle using pred[];
-%        store cycle as Rc<Vec<EdgeIndex>>;
-%    }
-%}
-%\end{lstlisting}
-%
-%\textbf{Profit Optimization (Golden Section Search):}
-%\begin{lstlisting}[]
-%fn optimize_cycle_gss(cycle, graph, source, min, max, tol, max_iter, gas_price) {
-%    // Search for input amount that maximizes profit
-%    let (best_x, best_profit) = golden_section_search(min, max, tol, max_iter, |x| {
-%        let profit = simulate_cycle_profit(cycle, x, graph, source, gas_price);
-%        return profit;
-%    });
-%    return (best_x, best_profit);
-%}
-%\end{lstlisting}
-
-\subsection{Edge Cases:}
+\subsection{Summary:}
+We have presented a Bellman-Ford algorithm with the following modifications:
 \begin{itemize}
     \item Cycles are only considered if they start and end at the designated start token (e.g., WETH).
     \item Reference-counted vectors (\texttt{Rc<Vec<EdgeIndex>>}) are used to avoid unnecessary cloning.
@@ -280,7 +292,12 @@ To further reduce runtime, we implemented the following memory management strate
     \item The golden section search adapts the input range if invalid points are encountered.
 \end{itemize}
 
-\section{Conclusion}
-The Tycho Searcher combines real-time data processing with efficient graph algorithms to detect arbitrage opportunities in decentralized exchanges. The use of optimized data structures, such as reference-counted vectors and big integer arithmetic, ensures both performance and correctness.
+%\section{Measurements}
+
+%\section{Conclusion}
+%The Tycho Searcher combines real-time data processing with efficient graph algorithms to detect arbitrage opportunities in decentralized exchanges. The use of optimized data structures, such as reference-counted vectors and big integer arithmetic, ensures both performance and correctness.
+
+\bibliographystyle{splncs04}
+\bibliography{references}
 
 \end{document} 

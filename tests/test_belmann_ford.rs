@@ -202,13 +202,15 @@ mod tests {
     fn test_bellman_ford_initialize_relax_adv_basic() {
         let (mut graph, source) = make_simple_graph();
         let mut stats = Statistics::default();
+        let mut qouter_time = std::time::Duration::default();
         let result = bellman_ford_initialize_relax(
             &mut graph,
             &mut stats,
             source,
             3,
             BigUint::from(1u64),
-            BigUint::from(1_000_000_000u64)
+            BigUint::from(1_000_000_000u64),
+            &mut qouter_time
         );
         // Should have a non-empty result for each node
         print_result(&(result.0.clone(), result.1.clone()));
