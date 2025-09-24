@@ -115,12 +115,12 @@ As a first step, we decompose the graph into connected components so that cycles
 
 We select a starting node from which the search begins, typically the WETH token.
 As a first step, we consider the 2-edge-connected component of the graph that contains the start node. Tokens that are either unreachable from the start node through AMMs, or reachable only via a single AMM, are irrelevant for the purpose of cycle detection.
-Next, we remove this node from the graph and compute the connected components. After adding the starting node back to the graph, we yield subgraphs that are disjoint except for the starting node. It is easy to see that cycles can be searched independently in these subgraphs, because any cycle that would traverse multiple components could only cross via the starting node. In such a case, however, the cycle can be split into smaller cycles that each remain within a single component.
+Next, we remove this node from the graph and compute the connected components. By adding the starting node back to the graph, we obtain subgraphs that are mutually disjoint apart from the starting node. It is easy to see that cycles can be searched independently in these subgraphs, because any cycle that would traverse multiple components could only cross via the starting node. In such a case, however, the cycle can be split into smaller cycles that each remain within a single component.
 
 Table \ref{table:graph} reports the graph size, the number of connected components, and the size of the largest component, as a function of the set of pools under consideration. The pools include Uniswap v2, v3, and v4, Ekubo v2, Balancer v2, and Curve. We further filter pools by their total value locked (TVL), measured in ether.
 The table shows that this step yields a significant speedup. For instance, in a graph with $2\,375$ nodes, the largest component contains only $367$ nodes, illustrating how special the structure of the graph is.
 
-See also Fig. \ref{fig:token_graph} showing the graph skeleton of the largest component, which is a simplified representation produced by first removing self-loops and iteratively pruning leaves (degree‑1 nodes), then collapsing degree‑2 chains into single edges marked as skeleton (and mark these edges as dashed lines). This preserves the graph for cycle search while suppressing peripheral noise and intermediate chain nodes for clearer visualization and analysis.
+See also Fig. \ref{fig:token_graph} showing the graph skeleton of the largest component, which is a simplified representation produced by first removing self-loops and iteratively pruning leaves (degree‑1 nodes), then collapsing degree‑2 chains into single edges marked as skeleton (and mark these edges as dashed lines). These transfromations preserves the graph for cycle search.
 
 
 \begin{table}
@@ -165,7 +165,7 @@ types&TVL &\#nodes&\#edges&nents&\#nodes&\#edges& \\
 \subsection{Modified Belmann-Ford}
  
  Next we explain our most important subrutine. 
-In this subrutine we assume $\xin$ is given, and a subgraph $G=(V,E)$. The task is to find cycles such that are profitable without considering gas, i.e.  $w_3(w_2(w_1(\xin))) > \xin$ on Fig. \ref{fig:arbcycle}.  
+In this subrutine we assume $\xin$ is given, and a subgraph $G=(V,E)$. The task is to find candidate cycles such that are profitable, i.e.  $w_3(w_2(w_1(\xin))) > \xin$ on Fig. \ref{fig:arbcycle}.  
 
 We define the following data structure 
  \begin{itemize}[leftmargin=*, label=--]
@@ -228,21 +228,21 @@ For each node $v$, the corresponding path $P^1_v$ from the start node.
 \end{algorithm}
 
 
-Algorithm \ref{alg:MBF} describes the pseudocode of the algorithm. It has following main steps:
+Algorithm \ref{alg:MBF} describes the pseudocode of the algorithm. It have the following steps:
 \begin{enumerate}[leftmargin=*, label=\arabic*.]
     \item Initialize distances from the source node to all other nodes as infinity, except the source itself (zero and empty path).
     \item For each edge $u \rightarrow v$, if node $u$ has a finite distance (i.e., $d_u \neq \infty$), attempt to extend the path $P_u$ by adding the edge. See function \texttt{extend\_path} for details.
     In our approach, this is allowed only if the pool of $e_{u \rightarrow v}$ has not previously been used in the path.
-    If this results in more tokens than currently recorded at $d_v$, then we need to update our data structures as follows: If the path $P_u$ dos not traverse token $v$, we update $d_v$ and $P_v$, otherwise we update  $d^1_v$ and $P^1_v$. In the later case we have found a path from $s$ and with a loop through $v$, which we save as a candidate. Finally, if node $v=s$, we have found a loop.
-    \item We perform a similar check if node $u$ has a finite distance with loop (i.e., $d_u \neq \infty$). In this case we don deal witht he case of having more loops.
-        \item Repeat the previous step for $k$ iterations, where $k$ is the maximum allowed path length.
+    If this results in more tokens than currently recorded at $d_v$, then we need to update our data structures as follows: If the path $P_u$ does not traverse token $v$, we update $d_v$ and $P_v$, otherwise we update  $d^1_v$ and $P^1_v$. In the latter case we have found a path from $s$ and with a loop through $v$, which we save as a candidate. Finally, if node $v=s$, we have found a loop.
+    \item We perform a similar check if node $u$ has a finite distance with loop (i.e., $d_u \neq \infty$). In this case, we do not deal with the possibility of having multiple loops.
+    \item Repeat the previous step for $k$ iterations, where $k$ is the maximum allowed path length.
     %\item After the main loop, check for negative cycles by verifying if any edge can still be relaxed. If so, reconstruct the cycle.
     %\item Store detected cycles as \texttt{Rc<Vec<EdgeIndex>>} to minimize cloning and memory usage.
 \end{enumerate}
 
 The function \texttt{extend\_path}$(d_u, g_u, P_u, e_{u \rightarrow v})$ returns the token amount and gas usage resulting from extending path $P_u$ with edge $e_{u \rightarrow v}$. Note that, it could handle the case where the same AMM is traversed multiple times along $P_u + e_{u \rightarrow v}$, updating its internal state after each traversal.
 
-The function \texttt{save\_cycle}$(\xin, P)$ saves a profitable arbitrage cycle with a given amount $\xin$. While the function 
+The function \texttt{save\_cycle}$(\xin, P)$ saves a profitable arbitrage cycle with a given amount $\xin$. Similarly, the function 
  \texttt{save\_path}$(\xin, P)$ saves a profitable path to a token, from which there is an arbitrage cycle. It also stores an amount $\xin$ from the start node. See Fig. \ref{fig:arb_path} for illustration.
    
 \begin{figure}   
