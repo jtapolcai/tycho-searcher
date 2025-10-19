@@ -45,7 +45,7 @@ pub fn find_all_negative_cycles(
 
     loop {
         let gas_price_search = if _amount_in < 0.01 {0.0} else {gas_price};
-    let (_profit_wo_gas, _profit_w_gas, cycles) = find_all_negative_cycles_amount(
+        let (_profit_wo_gas, _profit_w_gas, cycles) = find_all_negative_cycles_amount(
             graph,
             stats,
             source,
@@ -109,7 +109,7 @@ pub fn find_all_negative_cycles(
                 golden_section_search_with_gas(
                     &cycle,
                     graph,
-            stats,
+                    stats,
                     source,
                     amount_in_min,
                     amount_in_max,
@@ -730,7 +730,7 @@ fn golden_section_search_with_gas(
 ) -> Option<(f64, f64, f64, f64)> {
     // 0. lépés: keresd meg a minimális amount_in-t, amivel a kör legalább a gas költséget kitermeli
     let mut min_in = amount_in_min.max(1e-12); // ne legyen nulla
-    let mut last_min_in = 0.0;
+    let mut last_min_in ;
     let tolerance = 1e-9;
     let max_iter = 20;
 
@@ -806,80 +806,3 @@ fn golden_section_search_with_gas(
         None
     }
 }
-// Golden-section search over input amount including gas fee. Returns Some(best_amount_in, amount_out, total_gas_units, net_profit) if profitable
-fn golden_section_search_with_gas_old(
-    cycle: &[EdgeIndex],
-    graph: &mut Graph<NodeData, RefCell<EdgeData>, Directed>,
-    stats: &mut Statistics,
-    source: NodeIndex,
-    amount_in_min: f64,
-    amount_in_max: f64,
-    gss_tolerance: f64,
-    gss_max_iter: usize,
-    gas_price_in_start_node_token: f64,
-    quoter_time: &mut Duration,
-) -> Option<(f64, f64, f64, f64)> {
-    // 0) Find a minimal input that at least covers gas cost
-    let mut min_in = amount_in_min.max(1e-12); // avoid zero
-    let tolerance = 1e-9;
-    let max_iter = 20;
-    let mut prev_min_in = min_in;
-
-    for _ in 0..max_iter {
-        let (_profitable, _ain, aout, total_gas, _profit) =
-            evaluate_cycle_profit(cycle, graph, stats, source, min_in, gas_price_in_start_node_token, quoter_time);
-        let gas_cost_in_start = total_gas * gas_price_in_start_node_token * 1e-9;
-        let total_cost = gas_cost_in_start;
-
-        if aout < min_in + total_cost {
-            // Linearly estimate how much to increase
-            let diff = (min_in + total_cost) - aout;
-            min_in += diff.max(min_in * 0.1); // increase at least 10% to converge faster
-        } else {
-            break;
-        }
-        let step = (min_in - prev_min_in).abs();
-        prev_min_in = min_in;
-        if step < tolerance { break; }
-    }
-
-    if min_in > amount_in_max { return None; }
-
-    // Golden section search starting from min_in
-    let mut a = min_in;
-    let mut b = amount_in_max;
-    let gr = (5.0f64.sqrt() - 1.0) / 2.0; // conjugate golden ratio
-
-    let mut x1 = a + (1.0 - gr) * (b - a);
-    let mut x2 = a + gr * (b - a);
-
-    let mut f1 = evaluate_cycle_profit(cycle, graph, stats, source, x1, gas_price_in_start_node_token, quoter_time).4;
-    let mut f2 = evaluate_cycle_profit(cycle, graph, stats, source, x2, gas_price_in_start_node_token, quoter_time).4;
-
-    for _ in 0..gss_max_iter {
-        if f1 > f2 {
-            b = x2;
-            x2 = x1;
-            f2 = f1;
-            x1 = a + (1.0 - gr) * (b - a);
-            f1 = evaluate_cycle_profit(cycle, graph, stats, source, x1, gas_price_in_start_node_token, quoter_time).4;
-        } else {
-            a = x1;
-            x1 = x2;
-            f1 = f2;
-            x2 = a + gr * (b - a);
-            f2 = evaluate_cycle_profit(cycle, graph, stats, source, x2, gas_price_in_start_node_token, quoter_time).4;
-        }
-        if (b - a).abs() < gss_tolerance { break; }
-    }
-
-    let best_amount = (a + b) / 2.0;
-    let (is_profitable, final_amount_in, final_amount_out, final_gas, final_profit) =
-        evaluate_cycle_profit(cycle, graph, stats, source, best_amount, gas_price_in_start_node_token, quoter_time);
-    if is_profitable {
-        Some((final_amount_in, final_amount_out, final_gas, final_profit))
-    } else {
-        None
-    }
-}
-
