@@ -712,8 +712,102 @@ fn evaluate_cycle_profit(
     (net_profit > 0.0, amount_in, amount_out, total_gas_f64, net_profit)
 }
 
-// Golden-section search over input amount including gas fee. Returns Some(best_amount_in, amount_out, total_gas_units, net_profit) if profitable
 fn golden_section_search_with_gas(
+    //&self,
+    //stats: &mut Statistics,
+    //cycle: &[EdgeIndex],
+    //gas_price_in_start_node_token: f64,
+    cycle: &[EdgeIndex],
+    graph: &mut Graph<NodeData, RefCell<EdgeData>, Directed>,
+    stats: &mut Statistics,
+    source: NodeIndex,
+    amount_in_min: f64,
+    amount_in_max: f64,
+    gss_tolerance: f64,
+    gss_max_iter: usize,
+    gas_price_in_start_node_token: f64,
+    quoter_time: &mut Duration,
+) -> Option<(f64, f64, f64, f64)> {
+    // 0. lépés: keresd meg a minimális amount_in-t, amivel a kör legalább a gas költséget kitermeli
+    let mut min_in = amount_in_min.max(1e-12); // ne legyen nulla
+    let mut last_min_in = 0.0;
+    let tolerance = 1e-9;
+    let max_iter = 20;
+
+    for _ in 0..max_iter {
+        let (_profitable, _ain, aout, total_gas, _profit) =
+            evaluate_cycle_profit(cycle, graph, stats, source, min_in, gas_price_in_start_node_token, quoter_time);
+
+        let gas_cost_eth = total_gas * gas_price_in_start_node_token * 1e-9;
+        let flashloan_fee = min_in * 0.0005;
+        let total_cost = gas_cost_eth + flashloan_fee;
+
+        // Mekkora input kell, hogy legalább total_cost legyen a profit?
+        // profit = (aout - min_in) - total_cost >= 0
+        // aout - min_in = total_cost
+        // aout = min_in + total_cost
+        // Ha aout < min_in + total_cost, akkor növelni kell min_in-t
+        if aout < min_in + total_cost {
+            // Lineárisan becsüljük meg, mennyivel kell növelni
+            let diff = (min_in + total_cost) - aout;
+            last_min_in = min_in;
+            min_in += diff.max(min_in * 0.1); // legalább 10%-kal növeljük, hogy gyorsabban konvergáljon
+        } else {
+            break;
+        }
+        if (min_in - last_min_in).abs() < tolerance {
+            break;
+        }
+    }
+
+    // Ha a min_in túl nagy lett, akkor nincs értelmes megoldás
+    if min_in > amount_in_max {
+        return None;
+    }
+
+    // Golden section search a megtalált min_in-től indul
+    let mut a = min_in;
+    let mut b = amount_in_max;
+    let gr = (5.0f64.sqrt() - 1.0) / 2.0; // Golden ratio conjugate
+
+    let mut x1 = a + (1.0 - gr) * (b - a);
+    let mut x2 = a + gr * (b - a);
+
+    let mut f1 = evaluate_cycle_profit(cycle, graph, stats, source, x1, gas_price_in_start_node_token, quoter_time).4;
+    let mut f2 = evaluate_cycle_profit(cycle, graph, stats, source, x2, gas_price_in_start_node_token, quoter_time).4;
+
+    for _ in 0..gss_max_iter {
+        if f1 > f2 {
+            b = x2;
+            x2 = x1;
+            f2 = f1;
+            x1 = a + (1.0 - gr) * (b - a);
+            f1 = evaluate_cycle_profit(cycle, graph, stats, source, x1, gas_price_in_start_node_token, quoter_time).4;
+        } else {
+            a = x1;
+            x1 = x2;
+            f1 = f2;
+            x2 = a + gr * (b - a);
+            f2 = evaluate_cycle_profit(cycle, graph, stats, source, x2, gas_price_in_start_node_token, quoter_time).4;        
+        }
+
+        if (b - a).abs() < gss_tolerance {
+            break;
+        }
+    }
+
+    let best_amount = (a + b) / 2.0;
+    let (is_profitable, final_amount_in, final_amount_out, final_gas, final_profit) =
+         evaluate_cycle_profit(cycle, graph, stats, source, best_amount, gas_price_in_start_node_token, quoter_time);
+
+    if is_profitable {
+        Some((final_amount_in, final_amount_out, final_gas, final_profit))
+    } else {
+        None
+    }
+}
+// Golden-section search over input amount including gas fee. Returns Some(best_amount_in, amount_out, total_gas_units, net_profit) if profitable
+fn golden_section_search_with_gas_old(
     cycle: &[EdgeIndex],
     graph: &mut Graph<NodeData, RefCell<EdgeData>, Directed>,
     stats: &mut Statistics,

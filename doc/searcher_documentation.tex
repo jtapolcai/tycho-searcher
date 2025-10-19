@@ -20,7 +20,7 @@
 \newcommand{\xin}{x_{\text{in}}}
 \newcommand{\yout}{y_{\text{out}}}
 
-\usetikzlibrary{shadows, arrows.meta,decorations.markings}
+\usetikzlibrary{shadows, arrows.meta,decorations.markings,positioning,calc,fit}
 \tikzset{
   tokenstyle/.style={
     rectangle,
@@ -111,11 +111,141 @@ We restrict the search space to cycles in which every edge belongs to a differen
 
 \subsection{Precomupations}
 
-As a first step, we decompose the graph into connected components so that cycles can be searched independently within each component. This has several advantages: upon an update, only the affected components need to be recomputed, and the search is also easily parallelizable (though we did not implement parallelization in our prototype). 
+As a first step, we decompose the graph into 2-edge-connected components so that cycles can be searched independently within each of them.
+A 2-edge-connected component is a maximal set of nodes in which every pair of nodes is connected by at least two edge-disjoint paths. Equivalently, for any two nodes in the component, there exists a cycle that passes through both — even if the cycle is not simple (e.g., it may consist of a figure-eight shape).
+This subdivision has several advantages: upon an update, only the affected components need to be recomputed, and the search is also easily parallelizable (though we did not implement parallelization in our prototype).
 
-We select a starting node from which the search begins, typically the WETH token.
+In practice, we apply a slightly stronger decomposition, because the starting token (node) of the arbitrage cycles (e.g., WETH) is known in advance.
 As a first step, we consider the 2-edge-connected component of the graph that contains the start node. Tokens that are either unreachable from the start node through AMMs, or reachable only via a single AMM, are irrelevant for the purpose of cycle detection.
-Next, we remove this node from the graph and compute the connected components. By adding the starting node back to the graph, we obtain subgraphs that are mutually disjoint apart from the starting node. It is easy to see that cycles can be searched independently in these subgraphs, because any cycle that would traverse multiple components could only cross via the starting node. In such a case, however, the cycle can be split into smaller cycles that each remain within a single component.
+Next, we temporarily remove the starting node (e.g., WETH) from the graph and compute the connected components of the remaining graph.
+When we add the starting node back, each of these components becomes a subgraph that is only connected to the rest of the graph through the starting node.
+This effectively “splits” the search space into independent parts.
+It is easy to see that cycles can be searched independently in these subgraphs, because any cycle that would traverse multiple components could only cross via the starting node. Any hypothetical cycle spanning multiple components would have to pass through the starting node, and such a cycle can always be decomposed into smaller cycles contained entirely within individual subgraphs.
+
+\begin{figure}
+\centering
+\tikzset{
+    token/.style={circle, draw, thick, minimum size=7mm, inner sep=0pt, font=\small, fill=white},
+    start/.style={draw=black, fill=yellow!30, very thick},
+    faint/.style={token, draw=gray!70, fill=gray!10, text=gray!70},
+    unreachable/.style={token, draw=gray!60, fill=gray!15},
+    amm/.style={<->, thick},
+    weak/.style={<->, dashed, gray!70},
+    compbox/.style={draw, rounded corners, inner sep=3pt, thick},
+    label/.style={font=\footnotesize, align=center}
+ }
+\subfloat[Original graph with start node WETH]{
+\begin{tikzpicture}[]
+% Start node
+\node[start] (S) at (0,2) {\strut WETH};
+% Cluster left (C1-ish around WETH)
+\node[token] (a1) at (-1.5,3.2) {A1};
+\node[token] (a2) at (-2.3,2.0) {A2};
+\node[token] (a3) at (-1.5,0.8) {A3};
+\node[token] (a4) at (-0.4,3.1) {A4};
+% Edges around S (multiple AMMs)
+\draw[amm] (S) -- (a1);
+\draw[amm] (S) -- (a3);
+\draw[amm] (S) -- (a4);
+% Internal edges in left cluster (to hint at 2-edge-connectivity)
+\draw[amm] (a1) -- (a2);
+\draw[amm] (a2) -- (a3);
+\draw[amm] (a3) -- (a1);
+\draw[amm] (a1) -- (a4);
+% Right cluster (C2)
+\node[token] (b1) at (2.0,3.0) {B1};
+\node[token] (b2) at (3.0,2.0) {B2};
+\node[token] (b3) at (2.0,1.0) {B3};
+%
+\draw[amm] (S) -- (b2);
+\draw[amm] (b1) -- (b2);
+\draw[amm] (b2) -- (b3);
+\draw[amm] (b3) -- (b1);
+% A token reachable only via a single AMM from S (faint)
+\node[faint] (x1) at (0.2,0.2) {X};
+\draw[weak] (S) -- (x1);
+% Unreachable component (grey, no link to S)
+\node[unreachable] (u1) at (-3.5,2.8) {U1};
+\node[unreachable] (u2) at (-4.2,1.8) {U2};
+\node[unreachable] (u3) at (-3.6,0.8) {U3};
+\draw[weak] (u1) -- (u2);
+\draw[weak] (u2) -- (u3);
+\draw[weak] (u3) -- (u1);
+\node[label, anchor=north] at (-3.8,0.3) {\scriptsize Unreachable from WETH};
+\end{tikzpicture}}
+\\
+\subfloat[Step1: Remove start node. Identify the connected components of $G \setminus \{\text{WETH}\}$]{\qquad
+\begin{tikzpicture}[]
+% (No start node here)
+% Left component C1
+\node[token] (a1b) at (-1.5,3.2) {A1};
+\node[token] (a2b) at (-2.3,2.0) {A2};
+\node[token] (a3b) at (-1.5,0.8) {A3};
+\node[token] (a4b) at (-0.4,3.1) {A4};
+\draw[amm] (a1b) -- (a2b);
+\draw[amm] (a2b) -- (a3b);
+\draw[amm] (a3b) -- (a1b);
+\draw[amm] (a1b) -- (a4b);
+\node[compbox, fit=(a1b)(a2b)(a3b)(a4b), label] (C1box) {};
+\node[label, above=1pt of C1box.north] {\scriptsize $C_1$};
+% Right component C2
+\node[token] (b1b) at (2.0,3.0) {B1};
+\node[token] (b2b) at (3.0,2.0) {B2};
+\node[token] (b3b) at (2.0,1.0) {B3};
+\draw[amm] (b1b) -- (b2b);
+\draw[amm] (b2b) -- (b3b);
+\draw[amm] (b3b) -- (b1b);
+\node[compbox, fit=(b1b)(b2b)(b3b), label] (C2box) {};
+\node[label, above=1pt of C2box.north] {\scriptsize $C_2$};
+% Single-edge node becomes singleton (could be filtered out)
+\node[faint] (x1b) at (0.2,0.2) {X};
+\node[compbox, draw=gray!60, fit=(x1b)] (C3box) {};
+\node[label, below=1pt of C3box.south] {\scriptsize $C_3$ (singleton)};
+% Unreachable stays its own component
+\node[unreachable] (u1b) at (-3.5,2.8) {U1};
+\node[unreachable] (u2b) at (-4.2,1.8) {U2};
+\node[unreachable] (u3b) at (-3.6,0.8) {U3};
+\draw[weak] (u1b) -- (u2b);
+\draw[weak] (u2b) -- (u3b);
+\draw[weak] (u3b) -- (u1b);
+\node[compbox, draw=gray!60, fit=(u1b)(u2b)(u3b)] (C0box) {};
+\node[label, above=1pt of C0box.north] {\scriptsize $C_0$ (unreachable)};
+\end{tikzpicture}\qquad\qquad}
+\\
+\subfloat[Add start node back. Independent subgraphs via WETH]{
+\begin{tikzpicture}[]
+% Start node again
+\node[start] (Sc) at (0,2) {\strut WETH};
+% C1 + WETH subgraph
+\node[token] (a1c) at (-1.5,3.2) {A1};
+\node[token] (a2c) at (-2.3,2.0) {A2};
+\node[token] (a3c) at (-1.5,0.8) {A3};
+\node[token] (a4c) at (-0.4,3.1) {A4};
+\draw[amm] (Sc) -- (a1c);
+\draw[amm] (Sc) -- (a3c);
+\draw[amm] (Sc) -- (a4c);
+\draw[amm] (a1c) -- (a2c);
+\draw[amm] (a2c) -- (a3c);
+\draw[amm] (a3c) -- (a1c);
+\node[compbox, fit=(a1c)(a2c)(a3c)(a4c)(Sc)] (S1) {};
+\node[label, above=1pt of S1.north,xshift=-1cm] {\scriptsize Subgraph $S_1 = C_1 \cup \{\text{WETH}\}$};
+% C2 + WETH subgraph
+\node[token] (b1c) at (2.0,3.0) {B1};
+\node[token] (b2c) at (3.0,2.0) {B2};
+\node[token] (b3c) at (2.0,1.0) {B3};
+\draw[amm] (Sc) -- (b2c);
+\draw[amm] (b1c) -- (b2c);
+\draw[amm] (b2c) -- (b3c);
+\draw[amm] (b3c) -- (b1c);
+\node[compbox, fit=(b1c)(b2c)(b3c)(Sc)] (S2) {};
+\node[label, above=1pt of S2.north,xshift=2cm] {\scriptsize Subgraph $S_2 = C_2 \cup \{\text{WETH}\}$};
+% Singleton / filtered (optional)
+\node[faint] (x1c) at (0.2,0.2) {X};
+\draw[weak] (Sc) -- (x1c);
+\node[label] at (0.3,-0.4) {\scriptsize (single-edge, often ignored)};
+\end{tikzpicture}}
+\caption{Decompose the graph into components for arbitrage cycle search}
+\end{figure}
 
 Table \ref{table:graph} reports the graph size, the number of connected components, and the size of the largest component, as a function of the set of pools under consideration. The pools include Uniswap v2, v3, and v4, Ekubo v2, Balancer v2, and Curve. We further filter pools by their total value locked (TVL), measured in ether.
 The table shows that this step yields a significant speedup. For instance, in a graph with $2\,375$ nodes, the largest component contains only $367$ nodes, illustrating how special the structure of the graph is.
@@ -292,10 +422,6 @@ We have presented a Bellman-Ford algorithm with the following modifications:
     \item The golden section search adapts the input range if invalid points are encountered.
 \end{itemize}
 
-%\section{Measurements}
-
-%\section{Conclusion}
-%The Tycho Searcher combines real-time data processing with efficient graph algorithms to detect arbitrage opportunities in decentralized exchanges. The use of optimized data structures, such as reference-counted vectors and big integer arithmetic, ensures both performance and correctness.
 
 \bibliographystyle{splncs04}
 \bibliography{references}
