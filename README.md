@@ -2,8 +2,6 @@
 
 Tycho Searcher is a high-performance arbitrage detection engine built with Rust and the [Tycho library](https://docs.propellerheads.xyz/tycho). This project demonstrates real-time arbitrage opportunity detection across multiple decentralized exchanges using advanced graph algorithms and gas-optimized profit calculations.
 
-ℹ️ **Project Background:** Built for exploring DeFi arbitrage opportunities with Tycho's real-time data streams. Join developers using Tycho in [tycho.build](https://t.me/+B4CNQwv7dgIyYTJl).
-
 ## Features
 
 - **Real-time DEX Monitoring**: Connects to Tycho's live data feed for block-by-block pool state updates
