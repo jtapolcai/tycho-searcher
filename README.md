@@ -44,54 +44,63 @@ The core algorithm uses a **modified Bellman-Ford** to detect negative cycles in
 - **Early termination**: Stops when no profitable cycles remain
 - **Component isolation**: Processes connected components independently
 
-## Quick Start
+### Quick Start
 
-### Prerequisites
+Prerequisites
 
-- Rust 1.70+ and Cargo
+- Rust (recommended: stable >= 1.89.0)
+- Cargo
 - Tycho API access (use `TYCHO_URL` environment variable or default endpoints)
 
-### Setup
+Setup
 
 1. Clone the repository:
-   ```bash
-   git clone <repository-url>
-   cd tycho-searcher
-   ```
+    ```bash
+    git clone <repository-url>
+    cd tycho-searcher
+    ```
 
-2. Set up environment:
-   ```bash
-   # Optional: Set custom Tycho endpoint
-   export TYCHO_URL=https://your-tycho-endpoint.com
-   ```
+2. Set up environment (example):
+    ```bash
+    # RPC provider used for gas price lookups
+    export RPC_URL=https://mainnet.infura.io/v3/YOUR_INFURA_KEY
+    # Optional: Set custom Tycho endpoint
+    export TYCHO_URL=https://your-tycho-endpoint.com
+    ```
 
-3. Run the searcher:
-   ```bash
-   cargo run --release -- --chain ethereum --tvl-threshold 10.0
-   ```
+3. Build and run the searcher (example):
+    ```bash
+    cargo build --release
+    cargo run --release -- --chain ethereum --tvl-threshold 10.0
+    ```
 
 ## Configuration
 
 ### Command Line Options
 
-```bash
-# Core parameters
---chain CHAIN                    # Target blockchain (ethereum, base, unichain)
---tvl-threshold AMOUNT          # Minimum pool TVL threshold
---start-token ADDRESS           # Starting token address (default: WETH)
+The CLI flags are implemented with `clap` (see `src/command_line_parameters.rs`). Key flags:
 
-# Bellman-Ford parameters  
---bf-max-iterations N           # Maximum relaxation iterations (default: 4)
---bf-amount-in-min AMOUNT       # Minimum input amount (default: 0.001)
---bf-amount-in-max AMOUNT       # Maximum input amount (default: 1000.0)
---bf-gss-tolerance TOL          # Golden section search tolerance (default: 1e-4)
---bf-gss-max-iter N            # GSS maximum iterations (default: 40)
+```text
+--chain <CHAIN>                Target blockchain (ethereum, base, unichain). Default: "ethereum"
+--tvl-threshold <FLOAT>        TVL filter for pools. Default: 10.0
+--start-token <ADDRESS>        Starting token address (default: wrapped ETH address in code)
+--uniswap-pools                When set, register only Uniswap exchanges (uniswap_v2/v3/v4)
 
-# Logging options
---log                          # Enable all console logs
---log-pool                     # Enable pool quoter logs only
---log-arb                      # Enable arbitrage logs only
---export-graph                 # Export graph to JSON files
+# Bellman-Ford / search params
+--bf-max-iterations <N>        Max Bellman-Ford iterations (default: 4)
+--bf-amount-in-min <FLOAT>    Min input amount for GSS (default: 0.001)
+--bf-amount-in-max <FLOAT>    Max input amount for GSS (default: 1000.0)
+--bf-max-outer-iterations <N>  (internal tuning parameter; default from source)
+--bf-gss-tolerance <FLOAT>     Golden-section search tolerance (default: 1e-4)
+--bf-gss-max-iter <N>         Golden-section search max iterations (default: 40)
+
+# Logging
+--log                         Enable all console logs
+--log-pool                    Enable POOL (quoter) logs
+--log-arb                     Enable ARB (arbitrage) logs
+
+# Export
+--export-graph                Export graph JSON (writes `full_graph.json`, `largest_component.json`)
 ```
 
 ### Advanced Usage
@@ -193,42 +202,49 @@ flowchart TD
     H --> I
 ```
 
-## Quick Start
+## Tools and utilities
 
-### Requirements
-- Rust (edition 2021, recommended: latest stable)
-- Cargo
-- [tycho-simulation](https://github.com/propeller-heads/tycho-simulation) and dependencies
-- A working Tycho feed endpoint and API key
+Graph analysis helper (Python)
 
-### Build
+There is a small Python utility in `tools/graph_analyzer.py` to inspect and visualize exported graph JSONs (`largest_component.json`, `full_graph.json`). It can produce matplotlib visualizations and export a TikZ/PGF figure.
+
+Install (recommended in a virtualenv):
+```bash
+pip install matplotlib networkx pandas
+```
+
+Basic usage:
+```bash
+python3 tools/graph_analyzer.py --file largest_component.json
+# interactive plots will be shown with plt.show(); use --no-viz to skip plotting
+python3 tools/graph_analyzer.py --file largest_component.json --latex graph.tex
+python3 tools/graph_analyzer.py --file largest_component.json --sceleton --latex graph_skeleton.tex
+```
+
+Note about Rust toolchain
+
+Some dependencies in the workspace (e.g., Foundry-related crates) require a newer Rust toolchain (>= 1.89). If you encounter errors mentioning an unsupported rustc version, either upgrade your system toolchain or add a `rust-toolchain.toml` at the project root:
+
+```toml
+[toolchain]
+channel = "1.89.0"
+components = ["rustfmt", "clippy"]
+```
+
+Build
+
 ```sh
 cargo build --release
 ```
 
-### Run
-Set up your environment (see `.env.example`):
+Run
+
+Set up your environment (see `.env.example`) and run with the desired options:
 ```sh
 export TYCHO_URL=...         # Tycho feed endpoint
 export TYCHO_API_KEY=...     # Your API key
 export RPC_URL=...           # Ethereum RPC endpoint
-cargo run --release -- [OPTIONS]
-```
-
-### CLI Options
-The Searcher supports many CLI flags (see `src/command_line_parameters.rs` for all):
-
-- `--chain <CHAIN>`: Target blockchain (default: ethereum)
-- `--tvl-threshold <FLOAT>`: TVL filter for pools (default: 10.0)
-- `--start-token <ADDRESS>`: Start token address (default: WETH)
-- `--start-token-amount <FLOAT>`: Input amount for search
-- `--all-pools`: Include all supported DEXes
-- `--bf-max-iterations <N>`: Bellman-Ford iterations
-- `--enable-bf-logging`: Enable detailed Bellman-Ford logs
-
-Example:
-```sh
-cargo run --release -- --chain ethereum --tvl-threshold 1000 --all-pools --enable-bf-logging
+cargo run --release -- --chain ethereum --tvl-threshold 100.0 --export-graph
 ```
 
 ## Documentation
