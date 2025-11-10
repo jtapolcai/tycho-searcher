@@ -476,8 +476,14 @@ def visualize_graph(G, output_dir="tools/plots"):
         # Build a color map for protocols
         from matplotlib import cm
         cmap = cm.get_cmap('tab10')
+        # Prefer explicit color list for ListedColormap; fall back to sampling the colormap
+        cmap_colors = getattr(cmap, 'colors', None)
         for i, protocol in enumerate(sorted(protocols)):
-            protocol_colors[protocol] = cmap(i % cmap.N)
+            if cmap_colors:
+                protocol_colors[protocol] = cmap_colors[i % len(cmap_colors)]
+            else:
+                # sample the colormap evenly across the number of protocols (safe divide)
+                protocol_colors[protocol] = cmap(i / max(1, len(protocols) - 1))
 
         # Draw nodes
         nx.draw_networkx_nodes(G, pos, node_size=node_sizes, node_color='lightblue', alpha=0.9)

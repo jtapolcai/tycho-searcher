@@ -86,9 +86,8 @@ async fn main() -> anyhow::Result<()> {
             chain,
             Some(100 as i32),
             None,
-        ).await;
-        println!("Loaded {} tokens", all_tokens.len());
-
+        ).await?;
+        println!("Loaded {} tokens for chain {} from {}", all_tokens.len(), chain, tycho_url);
         let tvl_filter = ComponentFilter::with_tvl_range(cli.tvl_threshold, cli.tvl_threshold);
         println!("Building protocol stream for TVL>={}ETH",cli.tvl_threshold);
         let mut protocol_stream =
