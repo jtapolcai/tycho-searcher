@@ -32,7 +32,7 @@ use hex::decode;
 pub struct Cli {
     /// The tvl threshold to filter the graph by
     //#[arg(short, long, default_value_t = 10000.0)]
-    #[arg(short, long, default_value_t = 10.0)]
+    #[arg(short, long, default_value_t = 100.0)]
     //#[arg(short, long, default_value_t = 10.0)]
     pub tvl_threshold: f64,
     /// The target blockchain
@@ -74,6 +74,14 @@ pub struct Cli {
     /// Export graph to JSON file after processing
     #[arg(long, default_value = "false")]
     pub export_graph: bool,
+
+    /// Debug mód: graph.json és quoter log mentése, egy blokk után leáll
+    #[arg(long, default_value = "false")]
+    pub debug: bool,
+
+    /// Playback mode: load graph.json and quoter_log.json, use these instead of the Tycho feed
+    #[arg(long, default_value = "false")]
+    pub playback: bool,
 }
 
 pub fn get_default_url(chain: &Chain) -> Option<String> {

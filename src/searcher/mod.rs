@@ -47,7 +47,7 @@ pub mod arbitrage_save;
 
 use bellman_ford::{find_all_negative_cycles,describe_path};
 // Use types from graph_types module
-use graph_types::{NodeData, EdgeData, GraphError, graph_to_json, Statistics};
+use graph_types::{NodeData, EdgeData, GraphError, graph_to_json, Statistics, GraphJsonPlayback};
 // Import GraphComponents from graph_components module
 use crate::searcher::graph_components::GraphComponents;
 use crate::searcher::arbitrage_save::verify_arbitrage_opportunity;
@@ -74,6 +74,10 @@ pub struct Searcher {
     stats: Statistics,
     pub cli: crate::command_line_parameters::Cli, 
     rpc_url: String, // Ethereum node URL for fetching gas price
+    pub did_export_and_exit: bool,
+    pub last_gas_price: Option<f64>,
+    pub last_source: Option<usize>,
+    pub last_sink: Option<usize>,
 }
 
 impl Searcher {
@@ -81,7 +85,7 @@ impl Searcher {
         block_update_rx: Receiver<Update>,
         cli: crate::command_line_parameters::Cli,
         blacklist_tokens: HashSet<Vec<u8>>,
-    rpc_url: String, // Added parameter
+        rpc_url: String, // Added parameter
     ) -> Self {
         Self {
             rx: block_update_rx,
@@ -95,6 +99,10 @@ impl Searcher {
             stats: Statistics::default(),
             cli,
             rpc_url, // Initialize new field
+            did_export_and_exit: false,
+            last_gas_price: None,
+            last_source: None,
+            last_sink: None,
         }
     }
 
@@ -116,6 +124,9 @@ impl Searcher {
         })
     }
 
+    pub fn is_finished(&self) -> bool {
+        self.did_export_and_exit
+    }
 
     /// Adds a pool as an edge (or to an existing edge's pool list) in the graph.
     ///
@@ -177,8 +188,23 @@ impl Searcher {
         let mut bool_update_graph = false;
         let first_run=self.start_token_index.is_none();
         let block_number= format!("block:{}",update.block_number_or_timestamp);
+        // Top-level debug: always print counts so we know why no edges are added
+        println!("[DEBUG] update summary: block={} new_pairs={} states={}", update.block_number_or_timestamp, update.new_pairs.len(), update.states.len());
         for (_id, comp) in update.new_pairs.iter() {
             let pool_address = format!("0x{}", hex::encode(&comp.id));
+            // Debug helpers to diagnose missing states / skipped pools
+            println!("[DEBUG] update.new_pairs.len={} update.states.len={}", update.new_pairs.len(), update.states.len());
+            println!("[DEBUG] processing pair key='{}' pool_address='{}' protocol_system='{}' tokens_count={}", _id, pool_address, comp.protocol_system, comp.tokens.len());
+            for t in &comp.tokens {
+                println!("[DEBUG]   token symbol='{}' address='{}' decimals={}", t.symbol, format!("{:#042x}", t.address), t.decimals);
+            }
+            if update.states.contains_key(_id) {
+                println!("[DEBUG] state found by new_pairs key: '{}'", _id);
+            } else if update.states.contains_key(&pool_address) {
+                println!("[DEBUG] state found by computed pool_address: '{}'", pool_address);
+            } else {
+                println!("[DEBUG] state MISSING for pool {} (key: {})", pool_address, _id);
+            }
             if comp.protocol_system == "uniswap_v4" {
                 //println!("Uniswap V4 pool detected: {} {}", pool_address, pool_address.len());
             };
@@ -189,30 +215,35 @@ impl Searcher {
                 if !self.blacklist_tokens.contains(&comp.tokens[i].address.to_vec()) {
                     for j in (i + 1)..comp.tokens.len() {
                         if !self.blacklist_tokens.contains(&comp.tokens[j].address.to_vec()) {
-                            match update.states.get(&pool_address) {
-                                Some(state) => {
-                                    let state = state.clone();
-                                    self.add_pool(
-                                        &comp.tokens[i],
-                                        &comp.tokens[j],
-                                        comp,
-                                        state.clone(),
-                                        pool_address.clone(),
-                                    )?;
-                                    self.add_pool(
-                                        &comp.tokens[j],
-                                        &comp.tokens[i],
-                                        comp,
-                                        state,
-                                        pool_address.clone(),
-                                    )?;
-                                    bool_update_graph = true;
-                                },
-                                None => {
-                                    //println!("State not found for pool address: {:?} {}", pool_address, comp.protocol_system);
-                                    //println!("{:?} ", comp);
-                                    self.stats.state_not_found_for_pool += 1;
+                            // Try to find a matching state using multiple key formats (map key, 0x-prefixed pool address, or raw hex)
+                            let raw_hex = hex::encode(&comp.id);
+                            let keys_to_try = vec![_id.to_string(), pool_address.clone(), raw_hex.clone()];
+                            let mut found_state: Option<Box<dyn tycho_common::simulation::protocol_sim::ProtocolSim>> = None;
+                            for key in keys_to_try.iter() {
+                                if let Some(s) = update.states.get(key) {
+                                    found_state = Some(s.clone());
+                                    break;
                                 }
+                            }
+                            if let Some(state) = found_state {
+                                let state_clone = state.clone();
+                                self.add_pool(
+                                    &comp.tokens[i],
+                                    &comp.tokens[j],
+                                    comp,
+                                    state_clone.clone(),
+                                    pool_address.clone(),
+                                )?;
+                                self.add_pool(
+                                    &comp.tokens[j],
+                                    &comp.tokens[i],
+                                    comp,
+                                    state_clone,
+                                    pool_address.clone(),
+                                )?;
+                                bool_update_graph = true;
+                            } else {
+                                self.stats.state_not_found_for_pool += 1;
                             }
                         } else {
                             //println!("Skipping blacklisted token: {:?} (j:{})", comp.tokens[j],j);
@@ -272,17 +303,28 @@ impl Searcher {
                 
                 // Only export to JSON if the CLI flag is enabled
                 if self.cli.export_graph {
-                    // Export full graph
-                    let full_graph_json = graph_to_json(&self.graph, &block_number)?;
-                    if let Err(e) = std::fs::write("full_graph.json", full_graph_json) {
-                        eprintln!("[WARNING] Failed to write full_graph.json: {}", e);
+                    // Export full graph &self.graph
+                    let full_graph_json = graph_to_json(
+                        largest,
+                        &block_number,
+                        self.last_gas_price,
+                        self.last_source,
+                        self.last_sink,
+                    )?;
+                    if let Err(e) = std::fs::write("graph.json", full_graph_json) {
+                        eprintln!("[WARNING] Failed to write graph.json: {}", e);
                     } else {
-                        println!("Full graph written to full_graph.json ({} nodes, {} edges)", 
+                        println!("Full graph written to graph.json ({} nodes, {} edges)", 
                                 self.graph.node_count(), self.graph.edge_count());
                     }
-                    
                     // Export largest component
-                    let largest_json = graph_to_json(largest, &block_number)?;
+                    let largest_json = graph_to_json(
+                        largest,
+                        &block_number,
+                        self.last_gas_price,
+                        self.last_source,
+                        self.last_sink,
+                    )?;
                     if let Err(e) = std::fs::write("largest_component.json", largest_json) {
                         eprintln!("[WARNING] Failed to write largest_component.json: {}", e);
                     } else {
@@ -332,9 +374,13 @@ impl Searcher {
 
 
     pub async fn run(mut self) -> anyhow::Result<()> {
+        if self.did_export_and_exit {
+            println!("Debug mode: exiting without running the solver loop again.");
+            return Err(anyhow::anyhow!("Debug mode: exited without running the solver loop again."));
+        }
         //println!("Solver loop started...");
         while let Some(data) = self.rx.recv().await {
-            let gas_price = match self.rpc_url.parse() {
+            let mut gas_price = match self.rpc_url.parse() {
                 Ok(url) => {
                     let provider = ProviderBuilder::new().connect_http(url);
                     match provider.get_gas_price().await {
@@ -350,6 +396,10 @@ impl Searcher {
                     25.0 // Default 25 gwei
                 }
             };
+            if self.cli.debug {
+                gas_price *= 0.01;
+                println!("[DEBUG] Gas price scaled down to {:.4} gwei", gas_price);
+            }
             println!("=== Processing new block {} (gas price is: {:.2} gwei)===", data.block_number_or_timestamp, gas_price);
             
             // Periodic channel health check (every 10 blocks)
@@ -393,13 +443,25 @@ impl Searcher {
                         let graph_component = &mut self.components.graph_comps[comp_id];
                         if graph_component.node_count() >= 5 {
                             let file_name = format!("graphs/graph_{}.json", comp_id);
-                            let json_string = graph_to_json(graph_component, &block_number)?;
+                            let json_string = graph_to_json(
+                                graph_component,
+                                &block_number,
+                                self.last_gas_price,
+                                self.last_source,
+                                self.last_sink,
+                            )?;
                             if let Err(e) = std::fs::write(&file_name, json_string) {
                                 eprintln!("[WARNING] Failed to write {}: {}", file_name, e);
                             } else {
                                 println!("Graph component {} has {} nodes and {} edges (start node:{:?} {})", 
                                     file_name, graph_component.node_count(), graph_component.edge_count(),start_index, 
                                     graph_component.node_weight(start_index).map(|n| n.token.symbol.clone()).unwrap_or_else(|| "Unknown".to_string()));
+                                // If debug+export_graph: export and exit after first component
+                                if self.cli.debug && self.cli.export_graph && !self.did_export_and_exit {
+                                    println!("[SNAPSHOT] To run playback: cp {} graph.json && cargo run --bin tycho-searcher -- --playback", file_name);
+                                    self.did_export_and_exit = true;
+                                    return Err(anyhow::anyhow!("Debug mode: exited without running the solver loop again."))
+                                }
                             }
                         }
                         let start_timer = Instant::now();
@@ -461,5 +523,71 @@ impl Searcher {
         println!("❌ Solver run() loop exited!");
         Ok(())
     }
-    
+
+    /// Playback: run cycle search on loaded snapshot and print results
+    pub fn playback_cycle_search(&mut self) {
+        // Feltételezzük, hogy a graph.json már egyetlen komponens (a teljes vagy legnagyobb részgráf)
+        println!("[PLAYBACK] Loaded graph: nodes={}, edges={}", self.graph.node_count(), self.graph.edge_count());
+        let gas_price = self.last_gas_price.unwrap_or(25.0);
+        let start_index = self.last_source
+            .and_then(|idx| self.graph.node_indices().find(|i| i.index() == idx))
+            .or_else(|| self.start_token_index)
+            .unwrap_or_else(|| self.graph.node_indices().next().unwrap());
+        if self.graph.node_count() >= 5 {
+            let mut stats = crate::searcher::graph_types::Statistics::default();
+            let mut graph_mut = self.graph.clone();
+            let cycles = crate::searcher::bellman_ford::find_all_negative_cycles(
+                &mut graph_mut,
+                &mut stats,
+                start_index,
+                start_index,
+                self.cli.bf_max_iterations,
+                self.cli.bf_amount_in_min,
+                self.cli.bf_amount_in_max,
+                self.cli.bf_max_outer_iterations,
+                self.cli.bf_gss_tolerance,
+                self.cli.bf_gss_max_iter,
+                gas_price,
+            );
+            println!("[PLAYBACK] Found {} negative cycles", cycles.len());
+        } else {
+            println!("[PLAYBACK] Graph too small for cycle search ({} nodes)", self.graph.node_count());
+        }
+        println!("[PLAYBACK] Cycle search finished.");
+    }
+
+    pub fn from_graph_json(
+        cli: crate::command_line_parameters::Cli,
+        blacklist_tokens: HashSet<Vec<u8>>,
+        rpc_url: String,
+        graph_json_path: &str,
+    ) -> Result<Self, crate::searcher::graph_types::GraphError> {
+        use std::fs;
+        use crate::searcher::graph_types::{graph_from_json_str, DummyProtocolSim, GraphJsonPlayback};
+        use std::sync::Arc;
+        let json_str = fs::read_to_string(graph_json_path).map_err(crate::searcher::graph_types::GraphError::IoError)?;
+        let parsed: GraphJsonPlayback = serde_json::from_str(&json_str).map_err(crate::searcher::graph_types::GraphError::SerializationError)?;
+        let mut graph = graph_from_json_str(&json_str)?;
+        // Patch all edge states to DummyProtocolSim
+        for edge in graph.edge_weights_mut() {
+            edge.get_mut().state = Arc::new(DummyProtocolSim);
+        }
+        Ok(Self {
+            rx: tokio::sync::mpsc::channel(1).1, // dummy receiver, no feed in playback mode
+            graph,
+            components: GraphComponents::default(),
+            node_indices: HashMap::new(),
+            edge_index_by_pool: HashMap::new(),
+            start_token_index: parsed.source.map(|idx| petgraph::graph::NodeIndex::new(idx)),
+            start_token_name: None,
+            blacklist_tokens,
+            stats: Statistics::default(),
+            cli,
+            rpc_url,
+            did_export_and_exit: false,
+            last_gas_price: parsed.gas_price,
+            last_source: parsed.source,
+            last_sink: parsed.sink,
+        })
+    }
 }

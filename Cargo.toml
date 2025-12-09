@@ -4,31 +4,49 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1.37", features = ["full"] }
-futures = "0.3"
+serde = { version = "1.0", features = ["rc", "derive"] }
+serde_json = "1.0.105"
+
+# Async & concurrency
+tokio = { version = "1.47.1", features = ["full"] }
+futures = "0.3.31"
+
+# Logging & Tracing
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.17", default-features = false }
+
+# Utility
+num-traits = "0.2.17"
+num-bigint = { version = "0.4.6", features = ["serde"] }
+dotenv = "0.15.0"
+itertools = "0.10.5"
+hex-literal = "0.4.1"
+hex = "0.4.3"
+
 regex = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-lazy_static = "1.4"
-num-bigint = "0.4"
-num-traits = "0.2"
+
+
+# Caching
+mini-moka = "0.10"
+lazy_static = "1.4.0"
+
+tycho-client = ">=0.117.4"
+tycho-common = ">=0.117.4"
+tycho-ethereum = ">=0.117.4"
+tycho-execution = ">=0.137.1"
+tycho-simulation = { git = "https://github.com/propeller-heads/tycho-simulation.git", package = "tycho-simulation", tag = "0.211.2" }
+alloy = { version = "1.0.6", features = ["providers", "rpc-types-eth"] }
+
 ordered-float = "4"
 petgraph = "0.6"
-tracing-subscriber = "0.3"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
-dotenv = "0.15"
-hex = "0.4"
 bytes = "1"
-chrono = "0.4"
+chrono = { version = "0.4.26", features = ["serde"] }
 url = "2.5"
 
+reqwest = { version = "0.12.24", features = ["json"] }
 
-tycho-common = "0.91.0"
-tycho-client = "0.91.0"
-#tycho-simulation = { git = "https://github.com/propeller-heads/tycho-simulation.git", package = "tycho-simulation", tag = "0.170.0" }
-tycho-simulation = { git = "https://github.com/propeller-heads/tycho-simulation.git", package = "tycho-simulation", tag = "0.191.0" }
-alloy = { version = "1.0.6", features = ["providers", "rpc-types-eth"] }
 
 [[bin]]
 name = "tycho-searcher"

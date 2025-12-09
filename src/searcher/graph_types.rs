@@ -1,11 +1,33 @@
+// Dummy ProtocolSim for playback mode
+#[derive(Debug)]
+pub struct DummyProtocolSim;
+use tycho_common::simulation::protocol_sim::{ProtocolSim, GetAmountOutResult, Balances};
+use tycho_common::dto::ProtocolStateDelta;
+use tycho_common::simulation::errors::TransitionError;
+use tycho_common::Bytes;
+use tycho_common::simulation::errors::SimulationError;
+use std::collections::HashMap;
+impl ProtocolSim for DummyProtocolSim {
+    fn fee(&self) -> f64 { 0.0 }
+    fn spot_price(&self, _a: &tycho_common::models::token::Token, _b: &tycho_common::models::token::Token) -> Result<f64, SimulationError> { Err(SimulationError::FatalError("Not implemented".to_string())) }
+    fn get_amount_out(&self, _amount_in: num_bigint::BigUint, _token_in: &tycho_common::models::token::Token, _token_out: &tycho_common::models::token::Token) -> Result<GetAmountOutResult, SimulationError> { Err(SimulationError::FatalError("Not implemented".to_string())) }
+    fn get_limits(&self, _a: Bytes, _b: Bytes) -> Result<(num_bigint::BigUint, num_bigint::BigUint), SimulationError> { Err(SimulationError::FatalError("Not implemented".to_string())) }
+    fn delta_transition(&mut self, _delta: ProtocolStateDelta, _tokens: &HashMap<Bytes, tycho_common::models::token::Token>, _balances: &Balances) -> Result<(), TransitionError<String>> { Err(TransitionError::DecodeError("Dummy".into())) }
+    fn clone_box(&self) -> Box<dyn ProtocolSim> { Box::new(DummyProtocolSim) }
+    fn as_any(&self) -> &(dyn std::any::Any + 'static) { self }
+    fn as_any_mut(&mut self) -> &mut (dyn std::any::Any + 'static) { self }
+    fn eq(&self, _other: &(dyn ProtocolSim + 'static)) -> bool { false }
+}
 // src/solver/graph_types.rs
 
 // STD
 use std::{
     sync::Arc,
     error::Error,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap},
 };
+use serde::Deserialize;
+ 
 use ordered_float::OrderedFloat;
 
 use petgraph::{
@@ -17,7 +39,7 @@ use serde::Serialize;
 // Tycho
 use tycho_common::{
     models::{token::Token},
-    simulation::protocol_sim::ProtocolSim,
+    // ...existing code...
 };
 use tycho_simulation::{
     protocol::models::ProtocolComponent,
@@ -56,6 +78,68 @@ pub struct NodeData {
     pub price : f64, // to convert gas cost
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct NodeDataPlayback {
+    pub token: Token,
+    pub price: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EdgeDataPlayback {
+    pub source: usize,
+    pub target: usize,
+    pub pool: ProtocolComponent,
+    pub points: Vec<PricePointPlayback>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PricePointPlayback {
+    pub x: f64,
+    pub amount_out: f64,
+    pub gas: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GraphJsonPlayback {
+    pub nodes: Vec<NodeDataPlayback>,
+    pub edges: Vec<EdgeDataPlayback>,
+    #[serde(default)]
+    pub gas_price: Option<f64>,
+    #[serde(default)]
+    pub source: Option<usize>,
+    #[serde(default)]
+    pub sink: Option<usize>,
+}
+
+pub fn graph_from_json_str(json_str: &str) -> Result<Graph<NodeData, RefCell<EdgeData>, Directed>, GraphError> {
+    let parsed: GraphJsonPlayback = serde_json::from_str(json_str).map_err(GraphError::SerializationError)?;
+    let mut graph = Graph::<NodeData, RefCell<EdgeData>, Directed>::new();
+    let mut node_indices = Vec::new();
+    for node in &parsed.nodes {
+        let idx = graph.add_node(NodeData {
+            token: Arc::new(node.token.clone()),
+            price: node.price,
+        });
+        node_indices.push(idx);
+    }
+    for edge in &parsed.edges {
+        let source = node_indices[edge.source];
+        let target = node_indices[edge.target];
+        let mut points = std::collections::BTreeMap::new();
+        for p in &edge.points {
+            points.insert(OrderedFloat(p.x), PriceData { amount_out: p.amount_out, gas: p.gas });
+        }
+        let edge_data = EdgeData {
+            pool: Arc::new(edge.pool.clone()),
+            state: Arc::new(DummyProtocolSim), // Use DummyProtocolSim for playback mode
+            points,
+        };
+        graph.add_edge(source, target, RefCell::new(edge_data));
+    }
+    // Optionally: parsed.gas_price, parsed.source, parsed.sink can be returned or handled here if needed
+    Ok(graph)
+}
+
 // Custom error type
 #[derive(Debug)]
 pub enum GraphError {
@@ -87,37 +171,30 @@ impl std::fmt::Display for GraphError {
 impl Error for GraphError {}
 
 
-pub fn graph_to_json(graph: &Graph<NodeData, RefCell<EdgeData>, Directed>, comment: &str) -> Result<String, GraphError> {
+pub fn graph_to_json(
+    graph: &Graph<NodeData, RefCell<EdgeData>, Directed>,
+    comment: &str,
+    gas_price: Option<f64>,
+    source: Option<usize>,
+    sink: Option<usize>,
+) -> Result<String, GraphError> {
     let mut nodes_json = Vec::new();
-
     for (node_idx, node_data) in graph.node_weights().enumerate() {
+        let token_value = serde_json::to_value(&*node_data.token).map_err(GraphError::SerializationError)?;
         nodes_json.push(serde_json::json!({
-            "index": node_idx, // Use node_idx as index
-            "token": {
-                "address": format!("{:?}", node_data.token.address), // Assuming Bytes can be debug-formatted or convert to hex string
-                "decimals": node_data.token.decimals,
-                "symbol": node_data.token.symbol,
-                "gas": node_data.token.gas, 
-            },
+            "index": node_idx,
+            "token": token_value,
             "price": node_data.price,
         }));
     }
-
     let mut edges_json = Vec::new();
-
     for edge_ref in graph.raw_edges() {
         let edge_data = edge_ref.weight.borrow();
+        let pool_value = serde_json::to_value(&*edge_data.pool).map_err(GraphError::SerializationError)?;
         edges_json.push(serde_json::json!({
             "source": edge_ref.source().index(),
-            "target": edge_ref.target().index(),   
-            "pool": {
-                "address": edge_data.pool.id.clone(),
-                "id": edge_data.pool.id.clone(),
-                "protocol_system": edge_data.pool.protocol_system.clone(),
-                "protocol_type_name": edge_data.pool.protocol_type_name.clone(),
-                "chain": format!("{:?}", edge_data.pool.chain),
-                "created_at": edge_data.pool.created_at,
-            },
+            "target": edge_ref.target().index(),
+            "pool": pool_value,
             "points": edge_data.points.iter()
                 .map(|(k, v)| serde_json::json!({
                     "x": k.into_inner(),
@@ -127,13 +204,20 @@ pub fn graph_to_json(graph: &Graph<NodeData, RefCell<EdgeData>, Directed>, comme
                 .collect::<Vec<serde_json::Value>>(),
         }));
     }
-
-    let json_output = serde_json::json!({
+    let mut json_output = serde_json::json!({
         "comment": comment,
         "nodes": nodes_json,
         "edges": edges_json,
     });
-
+    if let Some(gas_price) = gas_price {
+        json_output["gas_price"] = serde_json::json!(gas_price);
+    }
+    if let Some(source) = source {
+        json_output["source"] = serde_json::json!(source);
+    }
+    if let Some(sink) = sink {
+        json_output["sink"] = serde_json::json!(sink);
+    }
     serde_json::to_string_pretty(&json_output)
         .map_err(GraphError::SerializationError)
 }

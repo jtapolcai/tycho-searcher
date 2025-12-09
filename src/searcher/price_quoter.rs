@@ -145,6 +145,7 @@ impl EdgeData {
     }
 
 
+
     pub fn quoter_amount_out(
         &self,
         token_in: &Token,
@@ -152,7 +153,15 @@ impl EdgeData {
         amount_in: &BigUint,
         stats: &mut Statistics
     ) -> Option<PriceDataRaw> {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        let debug_mode = std::env::var("QUOTER_DEBUG").ok().map(|v| v == "1").unwrap_or(false);
         if *amount_in == BigUint::zero() {
+            if debug_mode {
+                let log = format!("{{\"input\":{{\"token_in\":\"{}\",\"token_out\":\"{}\",\"amount_in\":\"{}\"}},\"output\":{{\"amount_out\":0,\"gas\":0}},\"status\":\"zero_input\"}}\n", token_in.symbol, token_out.symbol, amount_in);
+                let mut file = OpenOptions::new().create(true).append(true).open("quoter_log.json").unwrap();
+                file.write_all(log.as_bytes()).unwrap();
+            }
             return Some(PriceDataRaw { amount_out: BigUint::zero(), gas: BigUint::zero() });
         }
         let amount_out = self.state.get_amount_out(amount_in.clone(), token_in, token_out);
@@ -168,11 +177,21 @@ impl EdgeData {
                     token_in.symbol, token_out.symbol, self.address(),
                     amount_out_f64, price, gas_f64
                  );
+                if debug_mode {
+                    let log = format!("{{\"input\":{{\"token_in\":\"{}\",\"token_out\":\"{}\",\"amount_in\":\"{}\"}},\"output\":{{\"amount_out\":{},\"gas\":{}}},\"status\":\"ok\"}}\n", token_in.symbol, token_out.symbol, amount_in, out.amount, out.gas);
+                    let mut file = OpenOptions::new().create(true).append(true).open("quoter_log.json").unwrap();
+                    file.write_all(log.as_bytes()).unwrap();
+                }
                 Some(PriceDataRaw { amount_out: out.amount, gas: out.gas } )
             }
             Err(e) => {
-                self.handle_compute_error(e, token_in, token_out, stats);
+                self.handle_compute_error(e.to_string(), token_in, token_out, stats);
                 log_quoter_info!("No amount out for quoter_amount_out({})", amount_in);
+                if debug_mode {
+                    let log = format!("{{\"input\":{{\"token_in\":\"{}\",\"token_out\":\"{}\",\"amount_in\":\"{}\"}},\"error\":\"{}\",\"status\":\"error\"}}\n", token_in.symbol, token_out.symbol, amount_in, e);
+                    let mut file = OpenOptions::new().create(true).append(true).open("quoter_log.json").unwrap();
+                    file.write_all(log.as_bytes()).unwrap();
+                }
                 None
             }
         }
