@@ -1,3 +1,88 @@
+
+use serde::Deserialize;
+use std::sync::OnceLock;
+#[derive(Debug, Clone, Deserialize)]
+pub struct QuoterLogEntry {
+    pub input: QuoterLogInput,
+    pub output: Option<QuoterLogOutput>,
+    pub error: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct QuoterLogInput {
+    pub token_in: String,
+    pub token_out: String,
+    pub amount_in: String,
+    pub pool_address: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct QuoterLogOutput {
+    pub amount_out: String,
+    pub gas: String,
+}
+
+static QUOTER_CACHE: OnceLock<std::collections::HashMap<(String, String, String), (BigUint, BigUint)>> = OnceLock::new();
+static PLAYBACK_MODE: OnceLock<bool> = OnceLock::new();
+
+pub fn load_quoter_cache_once() {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+    if QUOTER_CACHE.get().is_some() { return; }
+    let playback = std::env::args().any(|a| a == "--playback");
+    PLAYBACK_MODE.set(playback).ok();
+    let mut cache = std::collections::HashMap::new();
+    if playback {
+        if let Ok(file) = File::open("quoter_log.json") {
+            let reader = BufReader::new(file);
+            let mut loaded = 0;
+            for line in reader.lines().flatten() {
+                if let Ok(entry) = serde_json::from_str::<QuoterLogEntry>(&line) {
+                    if entry.status == "ok" {
+                        if let (Some(output), input) = (entry.output, entry.input) {
+                            let key = (input.token_in.clone(), input.token_out.clone(), input.amount_in.clone());
+                            let amount_out = BigUint::parse_bytes(output.amount_out.as_bytes(), 10).unwrap_or(BigUint::zero());
+                            let gas = BigUint::parse_bytes(output.gas.as_bytes(), 10).unwrap_or(BigUint::zero());
+                            cache.insert(key, (amount_out, gas));
+                            loaded += 1;
+                        }
+                    }
+                }
+            }
+            println!("[PLAYBACK] Loaded {} cache entries from quoter_log.json", loaded);
+        }
+    }
+    QUOTER_CACHE.set(cache).ok();
+}
+
+fn log_quoter_json_zero_input(token_in: &str, token_out: &str, amount_in: &BigUint, pool_address: &str) -> String {
+    format!(
+        "{{\"input\":{{\"token_in\":\"{}\",\"token_out\":\"{}\",\"amount_in\":\"{}\",\"pool_address\":\"{}\"}},\"output\":{{\"amount_out\":\"0\",\"gas\":\"0\"}},\"status\":\"zero_input\"}}\n",
+        token_in, token_out, amount_in, pool_address
+    )
+}
+
+fn log_quoter_json_ok(token_in: &str, token_out: &str, amount_in: &BigUint, pool_address: &str, amount_out: &BigUint, gas: &BigUint) -> String {
+    format!(
+        "{{\"input\":{{\"token_in\":\"{}\",\"token_out\":\"{}\",\"amount_in\":\"{}\",\"pool_address\":\"{}\"}},\"output\":{{\"amount_out\":\"{}\",\"gas\":\"{}\"}},\"status\":\"ok\"}}\n",
+        token_in, token_out, amount_in, pool_address, amount_out, gas
+    )
+}
+
+fn log_quoter_json_error(token_in: &str, token_out: &str, amount_in: &BigUint, pool_address: &str, error: &str) -> String {
+    format!(
+        "{{\"input\":{{\"token_in\":\"{}\",\"token_out\":\"{}\",\"amount_in\":\"{}\",\"pool_address\":\"{}\"}},\"error\":\"{}\",\"status\":\"error\"}}\n",
+        token_in, token_out, amount_in, pool_address, error
+    )
+}
+fn log_quoter_json(log: &str) {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    let mut file = OpenOptions::new().create(true).append(true).open("quoter_log.json").unwrap();
+    file.write_all(log.as_bytes()).unwrap();
+}
+
 // price_quoter.rs
 use crate::log_quoter_info;
 
@@ -153,14 +238,42 @@ impl EdgeData {
         amount_in: &BigUint,
         stats: &mut Statistics
     ) -> Option<PriceDataRaw> {
+        // Playback mode: use quoter_log.json cache ONLY, do not fallback to live quoter
+        let playback = PLAYBACK_MODE.get().copied().unwrap_or(false);
+        if playback {
+            // Log all playback queries for later diff
+            //use std::fs::OpenOptions;
+            //use std::io::Write;
+            //let mut file = OpenOptions::new().create(true).append(true).open("playback_queries.log").unwrap();
+            //let log = format!("{}|{}|{}\n", token_in.symbol, token_out.symbol, amount_in.to_string());
+            //file.write_all(log.as_bytes()).unwrap();
+
+            let key = (token_in.symbol.clone(), token_out.symbol.clone(), amount_in.to_string());
+            match QUOTER_CACHE.get().and_then(|c| c.get(&key)) {
+                Some((amount_out, gas)) => {
+                    log_quoter_info!(
+                        "[PLAYBACK] Cached quoter: {} → {} @ {}: amount_in={} amount_out={} gas={}",
+                        token_in.symbol, token_out.symbol, self.address(), amount_in, amount_out, gas
+                    );
+                    return Some(PriceDataRaw { amount_out: amount_out.clone(), gas: gas.clone() });
+                }
+                None => {
+                    log_quoter_info!(
+                        "[PLAYBACK] ERROR: No cached quoter for {} → {}: amount_in={}",
+                        token_in.symbol, token_out.symbol,  amount_in // self.address(),
+                    );
+                    return None;
+                }
+            }
+        }
+        // if not playback
         use std::fs::OpenOptions;
         use std::io::Write;
         let debug_mode = std::env::var("QUOTER_DEBUG").ok().map(|v| v == "1").unwrap_or(false);
         if *amount_in == BigUint::zero() {
             if debug_mode {
-                let log = format!("{{\"input\":{{\"token_in\":\"{}\",\"token_out\":\"{}\",\"amount_in\":\"{}\"}},\"output\":{{\"amount_out\":0,\"gas\":0}},\"status\":\"zero_input\"}}\n", token_in.symbol, token_out.symbol, amount_in);
-                let mut file = OpenOptions::new().create(true).append(true).open("quoter_log.json").unwrap();
-                file.write_all(log.as_bytes()).unwrap();
+                let log = log_quoter_json_zero_input(&token_in.symbol, &token_out.symbol, amount_in, &self.address());
+                log_quoter_json(&log);
             }
             return Some(PriceDataRaw { amount_out: BigUint::zero(), gas: BigUint::zero() });
         }
@@ -178,9 +291,8 @@ impl EdgeData {
                     amount_out_f64, price, gas_f64
                  );
                 if debug_mode {
-                    let log = format!("{{\"input\":{{\"token_in\":\"{}\",\"token_out\":\"{}\",\"amount_in\":\"{}\"}},\"output\":{{\"amount_out\":{},\"gas\":{}}},\"status\":\"ok\"}}\n", token_in.symbol, token_out.symbol, amount_in, out.amount, out.gas);
-                    let mut file = OpenOptions::new().create(true).append(true).open("quoter_log.json").unwrap();
-                    file.write_all(log.as_bytes()).unwrap();
+                    let log = log_quoter_json_ok(&token_in.symbol, &token_out.symbol, amount_in, &self.address(), &out.amount, &out.gas);
+                    log_quoter_json(&log);
                 }
                 Some(PriceDataRaw { amount_out: out.amount, gas: out.gas } )
             }
@@ -188,9 +300,8 @@ impl EdgeData {
                 self.handle_compute_error(e.to_string(), token_in, token_out, stats);
                 log_quoter_info!("No amount out for quoter_amount_out({})", amount_in);
                 if debug_mode {
-                    let log = format!("{{\"input\":{{\"token_in\":\"{}\",\"token_out\":\"{}\",\"amount_in\":\"{}\"}},\"error\":\"{}\",\"status\":\"error\"}}\n", token_in.symbol, token_out.symbol, amount_in, e);
-                    let mut file = OpenOptions::new().create(true).append(true).open("quoter_log.json").unwrap();
-                    file.write_all(log.as_bytes()).unwrap();
+                    let log = log_quoter_json_error(&token_in.symbol, &token_out.symbol, amount_in, &self.address(), &e.to_string());
+                    log_quoter_json(&log);
                 }
                 None
             }
@@ -301,179 +412,4 @@ impl EdgeData {
         }
     }
 
-   /// Checks if the output of get_amount_out for each point in self.points differs from the stored value.
-    /// Returns true if any point differs (by amount_out or gas), otherwise false.
-    pub fn update_points(
-        &mut self,
-        stats: &mut Statistics,
-        tolerance: f64,
-        source: &NodeData,
-        target: &NodeData,
-    ) -> bool {
-        use num_traits::ToPrimitive;
-
-        for (key, price_data) in &self.points {
-            let amount_in_f64 = key.0;
-            let amount_in = BigUint::from(
-                (amount_in_f64 * 10f64.powi(source.token.decimals as i32)) as u128
-            );
-            match self.state.get_amount_out(amount_in, &*source.token, &*target.token) {
-                Ok(out) => {
-                    let amount_out_f64 = out.amount.to_f64().unwrap_or(0.0) / 10f64.powi(target.token.decimals as i32);
-                    let gas = out.gas.to_f64().unwrap_or(0.0);
-                    if (amount_out_f64 - price_data.amount_out).abs() > tolerance
-                        || (gas - price_data.gas).abs() > tolerance
-                    {
-                        return true;
-                    }
-                }
-                Err(e) => {
-                    self.handle_compute_error(e, &*source.token, &*target.token, stats);
-                    // If error, treat as changed
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    pub fn query_points(
-        &mut self,
-        _stats: &mut Statistics,
-        tolerance: f64,
-        swap_amount: f64,
-        source: &NodeData,
-        target: &NodeData,
-    ) -> bool {
-        use num_traits::ToPrimitive;
-        use ordered_float::OrderedFloat;
-        use std::collections::BTreeMap;
-        if source.price == 0.0 {
-            log_quoter_info!("Source price {} is zero, skipping query_points for pool {} becase its price is {}", source.token.symbol, self.address(), source.price);
-            return false;
-        }
-
-        let mut updated = false;
-        let mut new_points = BTreeMap::new();
-
-        let base_amount = source.price * swap_amount;
-        //let min_amount = base_amount;
-        //let max_amount = base_amount * 1e6;
-        let (mut min_amount, max_amount) = match self.state.get_limits(source.token.address.clone(), target.token.address.clone()) {
-            Ok((in_max, _out_max)) => {
-                let in_max_f64=in_max.to_f64().unwrap_or(0.0) / 10f64.powi(source.token.decimals as i32);
-                let min_amount=in_max_f64 / 1e6;
-                let max_amount=in_max_f64 / 1e2;
-                log_quoter_info!("Limits for {} → {}: in_max: {} [{},{}]", source.token.symbol, target.token.symbol, in_max_f64, min_amount, max_amount);
-                (min_amount, max_amount)
-            }
-            Err(_e) => {
-                log_quoter_info!("Failed to get limits for {} → {}: {}", source.token.symbol, target.token.symbol, _e);
-                (base_amount, base_amount * 1e6)
-            }
-        };
-
-        // Helper to get amount_out and gas for a given amount_in
-        let mut get_amount_out = |amount_in_f64: f64, this: &mut Self, source: &NodeData, target: &NodeData| -> (f64, f64) {
-            let amount_in = BigUint::from((amount_in_f64 * 10f64.powi(source.token.decimals as i32)) as u128);
-            match this.state.get_amount_out(amount_in, &*source.token, &*target.token) {
-                Ok(out) => {
-                    let amount_out_f64 = out.amount.to_f64().unwrap_or(0.0) / 10f64.powi(target.token.decimals as i32);
-                    let gas = out.gas.to_f64().unwrap_or(0.0);
-                    (amount_out_f64, gas)
-                }
-                Err(_e) => {
-                    //this.handle_compute_error(e, &*source.token, &*target.token, stats);
-                    //log_quoter_info!("Failed to get amount_out for {}", amount_in_f64);
-                    (0.0, 0.0)
-                }
-            }
-        };
-
-        // Helper closure for DP, always clamp to max_valid_amount if above
-        //let mut get_amount_out_clamped = |amount_in_f64: f64, this: &mut Self, source: &NodeData, target: &NodeData| -> (f64, f64) {
-        //    let amt = if amount_in_f64 > max_out { max_out } else { amount_in_f64 };
-        //    get_amount_out(amt, this, source, target).unwrap_or((0.0, gas1))
-        //};
-
-        // Find the smallest amount_in >= min_amount for which get_amount_out does not error
-        let mut amount_in = min_amount.clone();
-        let max_steps = 100;
-        let gas_price = target.price * 0.000001; // 0.003 USD
-        for _ in 0..max_steps {
-            let (output, _gas) = get_amount_out(amount_in.to_f64().unwrap_or(0.0), self, source, target);
-            if output < gas_price {
-                break;
-            }
-            amount_in /= 10.0;
-        }
-
-        // if first_invalid is None, it means we found a valid point
-        if min_amount > amount_in {
-            log_quoter_info!("The smallest suggested amount_in: {amount_in}");
-            min_amount = amount_in;
-        } 
-
-
-        // Always keep endpoints
-        let (min_out, gas0) = get_amount_out(min_amount, self, source, target);
-        new_points.insert(OrderedFloat(min_amount), PriceData { amount_out: min_out, gas: gas0 });
-        let (max_out, gas1) = get_amount_out(max_amount, self, source, target);
-        new_points.insert(OrderedFloat(max_amount), PriceData { amount_out: max_out, gas: gas1 });
-
-
-        // Recursive Douglas-Peucker
-        fn douglas_peucker<F>(
-            points: &mut BTreeMap<OrderedFloat<f64>, PriceData>,
-            x0: f64,
-            x1: f64,
-            y0: (f64, f64),
-            y1: (f64, f64),
-            get_y: &mut F,
-            this: &mut EdgeData,
-            source: &NodeData,
-            target: &NodeData,
-            tolerance: f64,
-        )
-        where
-            F: FnMut(f64, &mut EdgeData, &NodeData, &NodeData) -> (f64, f64),
-        {
-            let xm = (x0 * x1).sqrt(); // log-scale midpoint
-            let (ym, gas_m) = get_y(xm, this, source, target);
-
-            // Linear interpolation at xm
-            let y_interp = y0.0 + (y1.0 - y0.0) * ((xm - x0) / (x1 - x0));
-            let denom = ym.abs().max(1e-9);  // protection against tiny values
-            let rel_error = ((ym - y_interp) / denom).abs();
-
-            if rel_error > tolerance && (x1 / x0 > 1.01) {
-                // Recurse left
-                douglas_peucker(points, x0, xm, y0, (ym, gas_m), get_y, this, source, target, tolerance);
-                // Insert midpoint with correct gas
-                points.insert(OrderedFloat(xm), PriceData { amount_out: ym, gas: gas_m });
-                // Recurse right
-                douglas_peucker(points, xm, x1, (ym, gas_m), y1, get_y, this, source, target, tolerance);
-            }
-        }
-
-        // Recursively add points where needed
-        douglas_peucker(
-            &mut new_points,
-            min_amount,
-            max_amount,
-            (min_out, gas0),
-            (max_out, gas1),
-            &mut get_amount_out,
-            self,
-            source,
-            target,
-            tolerance,
-        );
-
-        if self.points != new_points {
-            self.points = new_points;
-            updated = true;
-        }
-        updated
-    }
 }

@@ -75,13 +75,16 @@ pub struct Cli {
     #[arg(long, default_value = "false")]
     pub export_graph: bool,
 
-    /// Debug mód: graph.json és quoter log mentése, egy blokk után leáll
+    /// Debug mode: save graph.json and quoter log, stop after one block
     #[arg(long, default_value = "false")]
     pub debug: bool,
 
     /// Playback mode: load graph.json and quoter_log.json, use these instead of the Tycho feed
     #[arg(long, default_value = "false")]
     pub playback: bool,
+
+    #[arg(long, default_value = "20")]
+    pub min_size_export: usize,
 }
 
 pub fn get_default_url(chain: &Chain) -> Option<String> {

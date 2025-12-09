@@ -52,6 +52,8 @@ use graph_types::{NodeData, EdgeData, GraphError, graph_to_json, Statistics, Gra
 use crate::searcher::graph_components::GraphComponents;
 use crate::searcher::arbitrage_save::verify_arbitrage_opportunity;
 
+use crate::log_quoter_info;
+
 // single path
 #[derive(Debug, Clone)]
 pub struct SwapRequest {
@@ -193,17 +195,17 @@ impl Searcher {
         for (_id, comp) in update.new_pairs.iter() {
             let pool_address = format!("0x{}", hex::encode(&comp.id));
             // Debug helpers to diagnose missing states / skipped pools
-            println!("[DEBUG] update.new_pairs.len={} update.states.len={}", update.new_pairs.len(), update.states.len());
-            println!("[DEBUG] processing pair key='{}' pool_address='{}' protocol_system='{}' tokens_count={}", _id, pool_address, comp.protocol_system, comp.tokens.len());
+            //println!("[DEBUG] update.new_pairs.len={} update.states.len={}", update.new_pairs.len(), update.states.len());
+            //println!("[DEBUG] processing pair key='{}' pool_address='{}' protocol_system='{}' tokens_count={}", _id, pool_address, comp.protocol_system, comp.tokens.len());
             for t in &comp.tokens {
-                println!("[DEBUG]   token symbol='{}' address='{}' decimals={}", t.symbol, format!("{:#042x}", t.address), t.decimals);
+                log_quoter_info!("[DEBUG]   token symbol='{}' address='{}' decimals={}", t.symbol, format!("{:#042x}", t.address), t.decimals);
             }
             if update.states.contains_key(_id) {
-                println!("[DEBUG] state found by new_pairs key: '{}'", _id);
+                log_quoter_info!("[DEBUG] state found by new_pairs key: '{}'", _id);
             } else if update.states.contains_key(&pool_address) {
-                println!("[DEBUG] state found by computed pool_address: '{}'", pool_address);
+                log_quoter_info!("[DEBUG] state found by computed pool_address: '{}'", pool_address);
             } else {
-                println!("[DEBUG] state MISSING for pool {} (key: {})", pool_address, _id);
+                log_quoter_info!("[DEBUG] state MISSING for pool {} (key: {})", pool_address, _id);
             }
             if comp.protocol_system == "uniswap_v4" {
                 //println!("Uniswap V4 pool detected: {} {}", pool_address, pool_address.len());
@@ -398,9 +400,11 @@ impl Searcher {
             };
             if self.cli.debug {
                 gas_price *= 0.01;
-                println!("[DEBUG] Gas price scaled down to {:.4} gwei", gas_price);
+                println!("=== Processing new block {} (gas price is scaled down to: {:.2} gwei)===", data.block_number_or_timestamp, gas_price);
+            } else {
+                println!("=== Processing new block {} (gas price is: {:.2} gwei)===", data.block_number_or_timestamp, gas_price);
             }
-            println!("=== Processing new block {} (gas price is: {:.2} gwei)===", data.block_number_or_timestamp, gas_price);
+            self.last_gas_price = Some(gas_price);
             
             // Periodic channel health check (every 10 blocks)
             // if data.block_number % 10 == 0 {
@@ -436,12 +440,14 @@ impl Searcher {
                             );
                         });
 
+                        self.last_source = Some(start_index.index());
+                        self.last_sink = Some(start_index.index());
                         // Extract the data needed from self before mutable borrow
                         let start_token_name = self.start_token_name.clone();
                         // If verify_arbitrage_opportunity needs more from self, extract here
 
                         let graph_component = &mut self.components.graph_comps[comp_id];
-                        if graph_component.node_count() >= 5 {
+                        if graph_component.node_count() >= self.cli.min_size_export {
                             let file_name = format!("graphs/graph_{}.json", comp_id);
                             let json_string = graph_to_json(
                                 graph_component,
@@ -458,9 +464,8 @@ impl Searcher {
                                     graph_component.node_weight(start_index).map(|n| n.token.symbol.clone()).unwrap_or_else(|| "Unknown".to_string()));
                                 // If debug+export_graph: export and exit after first component
                                 if self.cli.debug && self.cli.export_graph && !self.did_export_and_exit {
-                                    println!("[SNAPSHOT] To run playback: cp {} graph.json && cargo run --bin tycho-searcher -- --playback", file_name);
+                                    println!("[SNAPSHOT] To run playback: cp {} graph.json && cargo run --bin tycho-searcher -- --playback --log-pool", file_name);
                                     self.did_export_and_exit = true;
-                                    return Err(anyhow::anyhow!("Debug mode: exited without running the solver loop again."))
                                 }
                             }
                         }
@@ -512,6 +517,9 @@ impl Searcher {
                                 }
                             };
                         } 
+                        if self.did_export_and_exit {
+                            return Err(anyhow::anyhow!("Debug mode: exited without running the solver loop again."))
+                        }
                     }
                 }
                 Err(e) => {

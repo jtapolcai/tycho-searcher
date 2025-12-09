@@ -28,13 +28,21 @@ use crate::command_line_parameters::register_exchanges;
 
 pub mod command_line_parameters;
 use crate::command_line_parameters::{Cli, get_default_url, load_blacklist_from_file};
+use crate::searcher::price_quoter::load_quoter_cache_once;
+
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
 
     let cli = Cli::parse();
-    
+
+    // Törli a quoter_log.json tartalmát debug módban
+    if cli.debug {
+        use std::fs::File;
+        File::create("quoter_log.json").ok();
+    }
+
     let chain = Chain::from_str(&cli.chain)
         .unwrap_or_else(|_| panic!("Unknown chain {}", cli.chain));
 
@@ -85,6 +93,10 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
+    } else {
+        println!("[PLAYBACK] Playback mode enabled, skipping Ethereum node check.");
+        //init_playback_mode();
+        load_quoter_cache_once();
     }
     println!("Starting searcher...");
     let blacklist = load_blacklist_from_file("blacklist_tokens.txt")

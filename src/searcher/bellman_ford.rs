@@ -45,6 +45,8 @@ pub fn find_all_negative_cycles(
 
     loop {
         let gas_price_search = if _amount_in < 0.01 {0.0} else {gas_price};
+        //log_arb_info
+        println!("Searching cycles with amount_in = {:.6} WETH, gas_price = {:.6} gwei src:{} target:{} graph has {} nodes", _amount_in, gas_price_search, source.index(), target.index(), graph.node_count());
         let (_profit_wo_gas, _profit_w_gas, cycles) = find_all_negative_cycles_amount(
             graph,
             stats,
