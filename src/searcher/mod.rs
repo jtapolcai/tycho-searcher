@@ -43,6 +43,7 @@ pub mod logging; // Console logging toggle
 pub mod price_quoter;
 pub mod bellman_ford;
 pub mod arbitrage_save;
+pub mod merge_cycles; // Merge overlapping cycles with 2D optimization
 // pub mod crate::execution::arbitrage_save_worker;
 
 use bellman_ford::{find_all_negative_cycles,describe_path};
@@ -399,7 +400,7 @@ impl Searcher {
                 }
             };
             if self.cli.debug {
-                gas_price *= 0.01;
+                gas_price *= 0.1;
                 println!("=== Processing new block {} (gas price is scaled down to: {:.2} gwei)===", data.block_number_or_timestamp, gas_price);
             } else {
                 println!("=== Processing new block {} (gas price is: {:.2} gwei)===", data.block_number_or_timestamp, gas_price);
@@ -448,7 +449,8 @@ impl Searcher {
 
                         let graph_component = &mut self.components.graph_comps[comp_id];
                         if graph_component.node_count() >= self.cli.min_size_export {
-                            let file_name = format!("graphs/graph_{}.json", comp_id);
+                            //let file_name = format!("graphs/graph_{}.json", comp_id);
+                            let file_name = "graph.json";
                             let json_string = graph_to_json(
                                 graph_component,
                                 &block_number,
@@ -464,7 +466,7 @@ impl Searcher {
                                     graph_component.node_weight(start_index).map(|n| n.token.symbol.clone()).unwrap_or_else(|| "Unknown".to_string()));
                                 // If debug+export_graph: export and exit after first component
                                 if self.cli.debug && self.cli.export_graph && !self.did_export_and_exit {
-                                    println!("[SNAPSHOT] To run playback: cp {} graph.json && cargo run --bin tycho-searcher -- --playback --log-pool", file_name);
+                                    println!("[SNAPSHOT] To run playback: cargo run --bin tycho-searcher -- --playback --log-pool"); // cp {} graph.json &&  , file_name
                                     self.did_export_and_exit = true;
                                 }
                             }
@@ -558,6 +560,34 @@ impl Searcher {
                 gas_price,
             );
             println!("[PLAYBACK] Found {} negative cycles", cycles.len());
+            
+            for (cycle_amount_in, cycle_amount_out, cycle_total_gas, cycle) in cycles {
+                let start_token_name = self.graph[start_index].token.symbol.clone();
+                if let Some((tokens, pools, amount_in, amounts_out, profit_in_microeth, total_gas, profit_without_gas_in_microeth)) =
+                    verify_arbitrage_opportunity(
+                        cycle.as_ref().clone(),
+                        cycle_amount_in.clone(),
+                        start_token_name.clone(),
+                        &graph_mut,
+                        gas_price
+                    ) {
+                    println!("[PLAYBACK] Cycle: token {} amount_in={:.6} path={} profit={:.0} mikroETH (minus gas: {:.0} mikroETH)", 
+                        start_token_name, 
+                        cycle_amount_in, 
+                        describe_path(&graph_mut, &cycle), 
+                        profit_in_microeth,
+                        profit_without_gas_in_microeth
+                    );
+                } else {
+                    println!("[PLAYBACK] Cycle: token {} amount_in={:.6} amount_out={:.6} gas={:.6} path={}", 
+                        self.graph[start_index].token.symbol, 
+                        cycle_amount_in, 
+                        cycle_amount_out,
+                        cycle_total_gas,
+                        describe_path(&graph_mut, &cycle)
+                    );
+                }
+            }
         } else {
             println!("[PLAYBACK] Graph too small for cycle search ({} nodes)", self.graph.node_count());
         }

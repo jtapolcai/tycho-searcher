@@ -269,7 +269,8 @@ impl EdgeData {
         // if not playback
         use std::fs::OpenOptions;
         use std::io::Write;
-        let debug_mode = std::env::var("QUOTER_DEBUG").ok().map(|v| v == "1").unwrap_or(false);
+        // Debug mód: ha a programot --debug kapcsolóval futtatják
+        let debug_mode = std::env::args().any(|a| a == "--debug");
         if *amount_in == BigUint::zero() {
             if debug_mode {
                 let log = log_quoter_json_zero_input(&token_in.symbol, &token_out.symbol, amount_in, &self.address());

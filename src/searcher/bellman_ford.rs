@@ -45,8 +45,7 @@ pub fn find_all_negative_cycles(
 
     loop {
         let gas_price_search = if _amount_in < 0.01 {0.0} else {gas_price};
-        //log_arb_info
-        println!("Searching cycles with amount_in = {:.6} WETH, gas_price = {:.6} gwei src:{} target:{} graph has {} nodes", _amount_in, gas_price_search, source.index(), target.index(), graph.node_count());
+        log_arb_info!("Searching cycles with amount_in = {:.6} WETH, gas_price = {:.6} gwei src:{} target:{} graph has {} nodes", _amount_in, gas_price_search, source.index(), target.index(), graph.node_count());
         let (_profit_wo_gas, _profit_w_gas, cycles) = find_all_negative_cycles_amount(
             graph,
             stats,
@@ -87,7 +86,7 @@ pub fn find_all_negative_cycles(
                 tabu_cycles.insert(Rc::clone(&cycle_rc));
                 continue;
             }
-            let profit = cycle_amount_out - cycle_amount_in - gas_price * cycle_total_gas; 
+            let profit = cycle_amount_out - cycle_amount_in; // - gas_price * cycle_total_gas; 
             if profit > 0.0 {
                 // ARB log for profitable cycle before optimization (compute path only if logging is enabled)
                 if crate::searcher::logging::is_arb_enabled() {
@@ -95,11 +94,11 @@ pub fn find_all_negative_cycles(
                     let gas_cost_eth = cycle_total_gas * gas_price * 1e-9;
                     let net_eth = (cycle_amount_out - cycle_amount_in) - gas_cost_eth;
                     log_arb_info!(
-                        "profitable cycle pre-opt: in={:.6}, out={:.6}, gas_units={:.0}, gas_cost={:.6} WETH, net={:.6} WETH | {}",
+                        "potential cycle: in={:.6}, out={:.6}, gas_units={:.0}, gas_cost={:.6} WETH, net={:.6} WETH | {}",
                         cycle_amount_in, cycle_amount_out, cycle_total_gas, gas_cost_eth, net_eth, path_str
                     );
                 }
-                best_cycles.push((cycle_amount_in, cycle_amount_out, cycle_total_gas, Rc::clone(&cycle_rc)));
+                //best_cycles.push((cycle_amount_in, cycle_amount_out, cycle_total_gas, Rc::clone(&cycle_rc)));
             }
             tabu_cycles.insert(Rc::clone(&cycle_rc));
             _last_best_x = Some(cycle_amount_in);
@@ -128,27 +127,36 @@ pub fn find_all_negative_cycles(
                 }
             };
 
-        if let Some((best_x, amount_out, total_gas_units, best_profit)) = gss_result {
-                if best_profit > 0.0 {
-            gss_profitable += 1;
-                    // Keep gas as units to be consistent with non-optimized entries
-                    if crate::searcher::logging::is_arb_enabled() {
-                        let path_str = describe_path(graph, &cycle);
-                        log_arb_info!(
-                            "optimized cycle: in={:.6}, out={:.6}, gas_units={:.0}, net_profit={:.6} WETH | {}",
-                            best_x, amount_out, total_gas_units, best_profit, path_str
-                        );
-                    }
-                    best_cycles.push((best_x, amount_out, total_gas_units, Rc::clone(&cycle_rc)));
+        if let Some((best_x, amount_out, total_gas_units, net_profit)) = gss_result {
+            if net_profit >= 0.0 {
+                // at this point we have a profitable optimized cycle
+                gss_profitable += 1;
+                // Keep gas as units to be consistent with non-optimized entries
+                if crate::searcher::logging::is_arb_enabled() {
+                    let path_str = describe_path(graph, &cycle);
+                    log_arb_info!(
+                        "optimized cycle: in={:.6}, out={:.6}, gas_units={:.0}, net_profit={:.6} WETH | {}",
+                        best_x, amount_out, total_gas_units, net_profit, path_str
+                    );
                 }
-                tabu_cycles.insert(Rc::clone(&cycle_rc));
-                _last_best_x = Some(best_x);
-                _last_cycle = Some(Rc::clone(&cycle_rc));
+                best_cycles.push((best_x, amount_out, total_gas_units, Rc::clone(&cycle_rc)));
             } else {
-                tabu_cycles.insert(Rc::clone(&cycle_rc));
-                continue;
+                if crate::searcher::logging::is_arb_enabled() {
+                    let path_str = describe_path(graph, &cycle);
+                    log_arb_info!(
+                        "Non profitable cycle: in={:.6}, out={:.6}, gas_units={:.0}, net_profit={:.6} WETH | {}",
+                        best_x, amount_out, total_gas_units, net_profit, path_str
+                    );
+                }
             }
+            tabu_cycles.insert(Rc::clone(&cycle_rc));
+            //_last_best_x = Some(best_x);
+            //_last_cycle = Some(Rc::clone(&cycle_rc));
+        } else {
+            tabu_cycles.insert(Rc::clone(&cycle_rc));
+            continue;
         }
+    }
     if cycles.iter().all(|(_, _, _, c)| tabu_cycles.iter().any(|rc| rc.as_ref() == &**c)) {
             break;
         }
@@ -159,6 +167,25 @@ pub fn find_all_negative_cycles(
         log_arb_info!("Golden-section search called for {} cycle(s), profitable: {}", gss_calls, gss_profitable);
         log_arb_info!("Total quoter time: {:?}", total_quoter_time);
     }
+    
+    // Attempt to merge overlapping cycles with 2D optimization
+    if best_cycles.len() > 1 {
+        let _merged_pairs = crate::searcher::merge_cycles::optimize_merged_cycles(
+            best_cycles.clone(),
+            graph,
+            stats,
+            source,
+            amount_in_min,
+            amount_in_max,
+            gss_tolerance,
+            gss_max_iter,
+            gas_price,
+            &mut total_quoter_time,
+        );
+        // TODO: Decide how to incorporate merged pairs into the result
+        // For now, we just compute them and log them
+    }
+    
     best_cycles
 }
 
@@ -741,17 +768,15 @@ fn golden_section_search_with_gas(
             evaluate_cycle_profit(cycle, graph, stats, source, min_in, gas_price_in_start_node_token, quoter_time);
 
         let gas_cost_eth = total_gas * gas_price_in_start_node_token * 1e-9;
-        let flashloan_fee = min_in * 0.0005;
-        let total_cost = gas_cost_eth + flashloan_fee;
 
         // Mekkora input kell, hogy legalább total_cost legyen a profit?
         // profit = (aout - min_in) - total_cost >= 0
         // aout - min_in = total_cost
         // aout = min_in + total_cost
         // Ha aout < min_in + total_cost, akkor növelni kell min_in-t
-        if aout < min_in + total_cost {
+        if aout < min_in + gas_cost_eth {
             // Lineárisan becsüljük meg, mennyivel kell növelni
-            let diff = (min_in + total_cost) - aout;
+            let diff = (min_in + gas_cost_eth) - aout;
             last_min_in = min_in;
             min_in += diff.max(min_in * 0.1); // legalább 10%-kal növeljük, hogy gyorsabban konvergáljon
         } else {

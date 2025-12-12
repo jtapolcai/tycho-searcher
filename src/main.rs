@@ -37,8 +37,8 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // Törli a quoter_log.json tartalmát debug módban
-    if cli.debug {
+    // Törli a quoter_log.json tartalmát debug módban, de playback esetén nem
+    if cli.debug && !cli.playback {
         use std::fs::File;
         File::create("quoter_log.json").ok();
     }
