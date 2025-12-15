@@ -19,6 +19,34 @@ use crate::searcher::{EdgeData, NodeData, Statistics};
 use crate::searcher::bellman_ford::describe_path;
 use crate::log_arb_info;
 
+/// Check if two cycles can be merged
+/// They can be merged if all their common edges are in both shareable edge lists
+fn can_merge_cycles(
+    cycle1: &(f64, f64, f64, Rc<Vec<EdgeIndex>>, Vec<EdgeIndex>),
+    cycle2: &(f64, f64, f64, Rc<Vec<EdgeIndex>>, Vec<EdgeIndex>),
+) -> bool {
+    let (_, _, _, path1, shareable1) = cycle1;
+    let (_, _, _, path2, shareable2) = cycle2;
+    
+    // Find common edges between the two cycles
+    let edges1_set: HashSet<_> = path1.iter().copied().collect();
+    let edges2_set: HashSet<_> = path2.iter().copied().collect();
+    let common_edges: HashSet<_> = edges1_set.intersection(&edges2_set).copied().collect();
+    
+    // If no common edges, they can be merged (they don't interfere)
+    if common_edges.is_empty() {
+        return true;
+    }
+    
+    // All common edges must be in both shareable lists
+    let shareable1_set: HashSet<_> = shareable1.iter().copied().collect();
+    let shareable2_set: HashSet<_> = shareable2.iter().copied().collect();
+    
+    common_edges.iter().all(|edge| {
+        shareable1_set.contains(edge) && shareable2_set.contains(edge)
+    })
+}
+
 /// Represents a merged cycle result with optimized input amounts
 #[derive(Debug, Clone)]
 pub struct MergedCycleResult {
@@ -28,24 +56,15 @@ pub struct MergedCycleResult {
     pub net_profits: Vec<f64>,
     pub total_gas: f64,
     pub combined_net_profit: f64,
+    /// List of (EdgeIndex, optional_ratio) pairs in topological order
+    /// ratio is None when edge is not split, Some(r) where r in [0, 1] when split
+    /// When split, one branch can have ratio=None meaning "remainder"
+    pub edge_splits: Vec<(EdgeIndex, Option<f64>)>,
 }
 
-/// Build a map of which cycles use which edges
-fn build_edge_usage_map(
-    cycles: &[(f64, f64, f64, Rc<Vec<EdgeIndex>>)]
-) -> HashMap<EdgeIndex, Vec<usize>> {
-    let mut edge_to_cycles: HashMap<EdgeIndex, Vec<usize>> = HashMap::new();
-    
-    for (cycle_idx, (_, _, _, cycle)) in cycles.iter().enumerate() {
-        for &edge in cycle.as_ref() {
-            edge_to_cycles.entry(edge).or_insert_with(Vec::new).push(cycle_idx);
-        }
-    }
-    
-    edge_to_cycles
-}
 
-/// Evaluate multiple cycles together as a DAG, sharing gas costs on overlapping edges
+/// We treat splitting as multiple cycles. 
+/// This function evaluate multiple cycles together as a DAG, sharing gas costs on overlapping edges
 fn evaluate_merged_cycles(
     cycles: &[Rc<Vec<EdgeIndex>>],
     amounts_in: &[f64],
@@ -55,6 +74,8 @@ fn evaluate_merged_cycles(
     gas_price: f64,
     quoter_time: &mut Duration,
 ) -> Option<MergedCycleResult> {
+    let log_details = true;
+
     if cycles.is_empty() || cycles.len() != amounts_in.len() {
         return None;
     }
@@ -64,76 +85,134 @@ fn evaluate_merged_cycles(
     let decimals = from_node_data.token.decimals as u32;
     let multiplier = 10f64.powi(decimals as i32);
 
-    // Log cycle paths for visibility
-    for (idx, cycle_rc) in cycles.iter().enumerate() {
-        let path_str = describe_path(graph, cycle_rc.as_ref());
-        log_arb_info!("[MERGE] Cycle {} path: {}", idx, path_str);
+    // Log cycle paths for visibility - only once per subset
+    // Use a thread-local static to track if we've logged this subset
+    thread_local! {
+        static LOGGED_CYCLES: std::cell::RefCell<std::collections::HashSet<String>> = std::cell::RefCell::new(std::collections::HashSet::new());
+    }
+    
+    let cycles_key = format!("{:?}", cycles.iter().map(|c| c.as_ptr()).collect::<Vec<_>>());
+    let should_log_cycles = LOGGED_CYCLES.with(|logged| {
+        let mut set = logged.borrow_mut();
+        set.insert(cycles_key)
+    });
+    
+    if should_log_cycles {
+        for (idx, cycle_rc) in cycles.iter().enumerate() {
+            let path_str = describe_path(graph, cycle_rc.as_ref());
+            log_arb_info!("[MERGE] Cycle {} path: {}", idx, path_str);
+        }
     }
 
-    
-    
     // Build a DAG from the cycles
-    // Nodes: per-cycle source (0 step), sink, and cycle edges as transitions
-    let mut dag: DiGraph<(usize, NodeIndex), (usize, EdgeIndex)> = DiGraph::new();
+    // Nodes: represent actual tokens (NodeIndex), shared across cycles
+    // We track amounts per (cycle_id, token) pair separately
+    let mut dag: DiGraph<NodeIndex, EdgeIndex> = DiGraph::new();
     
-    // Create sink node in DAG (shared for all cycles)
-    let sink_dag = dag.add_node((n, source)); // All cycles end at sink (same as source after cycle)
-
-    // Map from (cycle_id, step) to DAG node and reverse lookup
-    let mut dag_nodes: std::collections::HashMap<(usize, usize), PetgraphNodeIndex> = std::collections::HashMap::new();
+    // Map from token NodeIndex to DAG node
+    let mut token_to_dag_node: HashMap<NodeIndex, PetgraphNodeIndex> = HashMap::new();
+    
+    // Create distinct source and sink DAG nodes (sink represents closing at source)
+    let _source_dag = *token_to_dag_node.entry(source).or_insert_with(|| dag.add_node(source));
+    let sink_dag = dag.add_node(source); // separate DAG node, same underlying token
 
     // Build DAG edges from cycle edges and track edge usage
     let mut edge_to_cycles: HashMap<EdgeIndex, Vec<(usize, usize)>> = HashMap::new(); // edge -> [(cycle_id, step)]
 
     for (cycle_id, cycle) in cycles.iter().enumerate() {
-        // Per-cycle source node with step 0
-        let source_dag = dag.add_node((cycle_id, source));
-        dag_nodes.insert((cycle_id, 0), source_dag);
-
-        let mut prev_node = source_dag;
+        let mut prev_token = source;
 
         for (step, &edge_idx) in cycle.iter().enumerate() {
             edge_to_cycles.entry(edge_idx).or_insert_with(Vec::new).push((cycle_id, step));
 
             let (_from, to) = graph.edge_endpoints(edge_idx)?;
-            let next_node = dag_nodes
-                .entry((cycle_id, step + 1))
-                .or_insert_with(|| {
-                    let node = dag.add_node((cycle_id, to));
-                    node
-                });
+            
+            // Get or create DAG nodes for tokens
+            let prev_dag = *token_to_dag_node.entry(prev_token).or_insert_with(|| dag.add_node(prev_token));
+            // if edge closes the cycle back to source, route to sink_dag instead of shared source node
+            let next_dag = if to == source { sink_dag } else { *token_to_dag_node.entry(to).or_insert_with(|| dag.add_node(to)) };
 
-            dag.add_edge(prev_node, *next_node, (cycle_id, edge_idx));
-            prev_node = *next_node;
+            // Add edge if not already present
+            if !dag.edges(prev_dag).any(|e| *e.weight() == edge_idx) {
+                dag.add_edge(prev_dag, next_dag, edge_idx);
+            }
+
+            prev_token = to;
         }
-
-        // Connect last node of cycle to sink
-        dag.add_edge(prev_node, sink_dag, (cycle_id, cycle[0])); // dummy edge
     }
     
     // Log DAG structure before toposort
-    log_arb_info!("[MERGE] DAG structure:");
-    for node_idx in dag.node_indices() {
-        let node_data = dag.node_weight(node_idx)?;
-        let out_count = dag.edges(node_idx).count();
-        log_arb_info!("[MERGE]   Node {:?} = (cycle {}, token_idx {:?}), {} outgoing edges", 
-            node_idx, node_data.0, node_data.1, out_count);
-    }
+    if log_details {
+        log_arb_info!("[MERGE] DAG structure:");
+        for node_idx in dag.node_indices() {
+            let token_idx = dag.node_weight(node_idx)?;
+            let token_node = graph.node_weight(*token_idx)?;
+            let out_count = dag.edges(node_idx).count();
+            log_arb_info!("[MERGE]   Node {:?} = token {}, {} outgoing edges", 
+                node_idx, token_node.token.symbol, out_count);
+        }
+    } 
     
     // Topological sort
     let topo_order = toposort(&dag, None).ok()?;
     
-    log_arb_info!("[MERGE] DAG has {} nodes in topo order: {:?}", topo_order.len(), topo_order);
-    log_arb_info!("[MERGE] Edge usage map:");
-    for (edge_idx, usages) in edge_to_cycles.iter() {
-        log_arb_info!("[MERGE]   Edge {:?} used by: {:?}", edge_idx, usages);
+    // Log topo order with token symbols
+    let topo_symbols: Vec<String> = topo_order.iter().map(|node_idx| {
+        if let Some(token_idx) = dag.node_weight(*node_idx) {
+            if let Some(token_node) = graph.node_weight(*token_idx) {
+                format!("({})", token_node.token.symbol)
+            } else {
+                format!("({:?})", node_idx)
+            }
+        } else {
+            format!("({:?})", node_idx)
+        }
+    }).collect();
+    log_arb_info!("[MERGE] DAG has {} nodes in topo order: [{}]", topo_order.len(), topo_symbols.join(", "));
+    // Print DAG edges after topo order for full visibility
+    if log_details {
+        log_arb_info!("[MERGE] DAG edges:");
+        for edge in dag.edge_indices() {
+            if let Some((from_dag, to_dag)) = dag.edge_endpoints(edge) {
+                let from_token_idx = dag.node_weight(from_dag).copied();
+                let to_token_idx = dag.node_weight(to_dag).copied();
+                let (from_sym, to_sym) = match (from_token_idx, to_token_idx) {
+                    (Some(fi), Some(ti)) => {
+                        let fs = graph.node_weight(fi).map(|n| n.token.symbol.clone()).unwrap_or_else(|| "?".to_string());
+                        let ts = graph.node_weight(ti).map(|n| n.token.symbol.clone()).unwrap_or_else(|| "?".to_string());
+                        (fs, ts)
+                    },
+                    _ => ("?".to_string(), "?".to_string()),
+                };
+                let eidx = dag.edge_weight(edge).copied();
+                if let Some(ei) = eidx {
+                    let (gf, gt) = graph.edge_endpoints(ei).unwrap_or((source, source));
+                    let gf_sym = graph.node_weight(gf).map(|n| n.token.symbol.clone()).unwrap_or_else(|| "?".to_string());
+                    let gt_sym = graph.node_weight(gt).map(|n| n.token.symbol.clone()).unwrap_or_else(|| "?".to_string());
+                    log_arb_info!("[MERGE]   DAG edge {:?}: dag {} -> {}, graph {} -> {}", edge, from_sym, to_sym, gf_sym, gt_sym);
+                } else {
+                    log_arb_info!("[MERGE]   DAG edge {:?}: dag {} -> {} (no graph edge index)", edge, from_sym, to_sym);
+                }
+            }
+        }
+    }
+    
+    if log_details {
+        log_arb_info!("[MERGE] Edge usage map:");
+        for (edge_idx, usages) in edge_to_cycles.iter() {
+            let (from, to) = graph.edge_endpoints(*edge_idx).unwrap_or((source, source));
+            let from_token = graph.node_weight(from).map(|n| n.token.symbol.clone()).unwrap_or_else(|| "?".to_string());
+            let to_token = graph.node_weight(to).map(|n| n.token.symbol.clone()).unwrap_or_else(|| "?".to_string());
+            log_arb_info!("[MERGE]   Edge {:?} ({} → {}) used by: {:?}", edge_idx, from_token, to_token, usages);
+        }
     }
 
-    // Initialize per-node amounts: start at each cycle's source
-    let mut amounts_at: std::collections::HashMap<(usize, usize), BigUint> = std::collections::HashMap::new();
+    // Initialize per-cycle amounts at shared source node
+    // amounts_at[(cycle_id, token_node_index)] = amount of that token for that cycle
+    let mut amounts_at: std::collections::HashMap<(usize, NodeIndex), BigUint> = std::collections::HashMap::new();
     for (cycle_id, &amt) in amounts_in.iter().enumerate() {
         let scaled = ((amt * multiplier).to_biguint()).unwrap_or(BigUint::from(0u32));
-        amounts_at.insert((cycle_id, 0), scaled);
+        amounts_at.insert((cycle_id, source), scaled);
     }
     
     log_arb_info!("[MERGE] Starting DAG evaluation with {} cycles", n);
@@ -143,23 +222,21 @@ fn evaluate_merged_cycles(
     
     let mut total_gas = BigUint::from(0u32);
     let mut gas_paid_edges: HashSet<EdgeIndex> = HashSet::new();
-    let mut edge_step_counter = 0;
+    let mut edge_splits: Vec<(EdgeIndex, Option<f64>)> = Vec::new();  // Track edge splits in topo order
     
     // Process edges in topological order
     for node_idx in topo_order {
         // Get outgoing edges from this node
+        let node_token = dag.node_weight(node_idx)?;
         let outgoing: Vec<_> = dag.edges(node_idx).map(|e| (e.id(), *e.weight())).collect();
         
-        log_arb_info!("[MERGE] Processing DAG node {:?} with {} outgoing edges", node_idx, outgoing.len());
+        let token_node = graph.node_weight(*node_token)?;
+        log_arb_info!("[MERGE] Processing DAG node (token {}) with {} outgoing edges", token_node.token.symbol, outgoing.len());
         
-        for (dag_edge_idx, (cycle_id, edge_idx)) in outgoing {
-            let (_from, target) = dag.edge_endpoints(dag_edge_idx)?;
-            
-            // Skip dummy edge to sink
-            if target == sink_dag {
-                continue;
-            }
+        for (dag_edge_idx, edge_idx) in outgoing {
+            let (_from, target_dag) = dag.edge_endpoints(dag_edge_idx)?;
 
+            let target_token = dag.node_weight(target_dag)?;
             let (from, to) = graph.edge_endpoints(edge_idx)?;
             let token_in = &graph.node_weight(from)?.token;
             let token_out = &graph.node_weight(to)?.token;
@@ -178,11 +255,11 @@ fn evaluate_merged_cycles(
                 let mut total_amount_in = BigUint::from(0u32);
                 let mut cycle_shares = Vec::new();
 
-                log_arb_info!("[MERGE] Step {}: SHARED EDGE {} → {} (used by {} cycles)",
-                    edge_step_counter, token_in.symbol, token_out.symbol, sharing_cycles.len());
+                log_arb_info!("[MERGE] SHARED EDGE {} → {} (used by {} cycles)",
+                    token_in.symbol, token_out.symbol, sharing_cycles.len());
 
                 for &(other_cycle_id, step) in sharing_cycles {
-                    let amt = amounts_at.get(&(other_cycle_id, step)).cloned().unwrap_or_else(|| BigUint::from(0u32));
+                    let amt = amounts_at.get(&(other_cycle_id, *node_token)).cloned().unwrap_or_else(|| BigUint::from(0u32));
                     if amt == BigUint::from(0u32) {
                         continue;
                     }
@@ -195,7 +272,6 @@ fn evaluate_merged_cycles(
 
                 if total_amount_in == BigUint::from(0u32) {
                     log_arb_info!("[MERGE]   Total summed amount is zero, skipping edge");
-                    edge_step_counter += 1;
                     continue;
                 }
 
@@ -230,30 +306,36 @@ fn evaluate_merged_cycles(
                 // Distribute amount_out proportionally
                 let total_out_f64 = result.amount_out.to_f64()?;
 
-                for (other_cycle_id, step) in cycle_shares {
-                    let amt_in = amounts_at.get(&(other_cycle_id, step)).cloned().unwrap_or_else(|| BigUint::from(0u32));
+                for (idx, (other_cycle_id, _step)) in cycle_shares.iter().enumerate() {
+                    let amt_in = amounts_at.get(&(*other_cycle_id, *node_token)).cloned().unwrap_or_else(|| BigUint::from(0u32));
                     let share = amt_in.to_f64()? / total_in_f64;
                     let proportional_out = (total_out_f64 * share).to_biguint()?;
                     let prop_out_f64 = proportional_out.to_f64()? / multiplier_out;
                     log_arb_info!("[MERGE]   Cycle {} gets {:.6} ({:.2}% share)",
                         other_cycle_id, prop_out_f64, share * 100.0);
-                    amounts_at.insert((other_cycle_id, step + 1), proportional_out);
+                    amounts_at.insert((*other_cycle_id, *target_token), proportional_out);
+                    
+                    // Record split: last cycle gets None (remainder), others get their share
+                    if idx < cycle_shares.len() - 1 {
+                        edge_splits.push((edge_idx, Some(share)));
+                    } else {
+                        edge_splits.push((edge_idx, None));  // Last gets remainder
+                    }
                 }
             } else {
-                // Exclusive edge: query normally
-                let step = sharing_cycles.get(0).map(|&(_, s)| s).unwrap_or(0);
-                let amt_in = amounts_at.get(&(cycle_id, step)).cloned().unwrap_or_else(|| BigUint::from(0u32));
+                // Exclusive edge: one cycle uses this edge alone
+                let (only_cycle_id, _step) = sharing_cycles.get(0).cloned().unwrap_or((0, 0));
+                let amt_in = amounts_at.get(&(only_cycle_id, *node_token)).cloned().unwrap_or_else(|| BigUint::from(0u32));
 
                 if amt_in == BigUint::from(0u32) {
-                    log_arb_info!("[MERGE] Step {}: EXCLUSIVE EDGE {} → {} (Cycle {}) has zero input, skipping",
-                        edge_step_counter, token_in.symbol, token_out.symbol, cycle_id);
-                    edge_step_counter += 1;
+                    log_arb_info!("[MERGE] EXCLUSIVE EDGE {} → {} (Cycle {}) has zero input, skipping",
+                        token_in.symbol, token_out.symbol, only_cycle_id);
                     continue;
                 }
 
                 let current_amt_f64 = amt_in.to_f64()?;
-                log_arb_info!("[MERGE] Step {}: EXCLUSIVE EDGE {} → {} (Cycle {})",
-                    edge_step_counter, token_in.symbol, token_out.symbol, cycle_id);
+                log_arb_info!("[MERGE] EXCLUSIVE EDGE {} → {} (Cycle {})",
+                    token_in.symbol, token_out.symbol, only_cycle_id);
                 log_arb_info!("[MERGE]   Input amount: {:.6}", current_amt_f64 / multiplier_in);
 
                 let t0 = std::time::Instant::now();
@@ -271,18 +353,19 @@ fn evaluate_merged_cycles(
                 log_arb_info!("[MERGE]   Quoter result: amount_out={:.6}, gas={:.0}",
                     result_out_f64 / multiplier_out, result_gas_f64);
 
-                amounts_at.insert((cycle_id, step + 1), result.amount_out);
+                amounts_at.insert((only_cycle_id, *target_token), result.amount_out);
                 total_gas += &result.gas;
+                
+                // No split for exclusive edge
+                edge_splits.push((edge_idx, None));
             }
-
-            edge_step_counter += 1;
         }
     }
     
     // Calculate final results
     let mut amounts_out = vec![0.0; n];
-    for (i, cycle) in cycles.iter().enumerate() {
-        if let Some(amount) = amounts_at.get(&(i, cycle.len())) {
+    for (i, _cycle) in cycles.iter().enumerate() {
+        if let Some(amount) = amounts_at.get(&(i, source)) {
             amounts_out[i] = amount.to_f64()? / multiplier;
         }
     }
@@ -308,6 +391,18 @@ fn evaluate_merged_cycles(
     combined_profit -= gas_cost;
     log_arb_info!("[MERGE] Combined profit (after gas): {:.6} ETH", combined_profit);
     
+    // Log edge splits with token symbols
+    log_arb_info!("[MERGE] Edge splits (in topological order):");
+    for (edge_idx, ratio_opt) in &edge_splits {
+        let (from, to) = graph.edge_endpoints(*edge_idx).unwrap_or((source, source));
+        let from_token = graph.node_weight(from).map(|n| n.token.symbol.clone()).unwrap_or_else(|| "?".to_string());
+        let to_token = graph.node_weight(to).map(|n| n.token.symbol.clone()).unwrap_or_else(|| "?".to_string());
+        match ratio_opt {
+            Some(ratio) => log_arb_info!("[MERGE]   Edge {:?} ({} → {}): ratio = {:.4}", edge_idx, from_token, to_token, ratio),
+            None => log_arb_info!("[MERGE]   Edge {:?} ({} → {}): ratio = None (remainder/exclusive)", edge_idx, from_token, to_token),
+        }
+    }
+    
     Some(MergedCycleResult {
         cycles: cycles.to_vec(),
         amounts_in: amounts_in.to_vec(),
@@ -315,70 +410,232 @@ fn evaluate_merged_cycles(
         net_profits,
         total_gas: total_gas_f64,
         combined_net_profit: combined_profit,
+        edge_splits,
     })
+}
+
+/// Group cycles into mergeable sets using greedy clustering
+/// Returns a Vec of groups where all cycles in each group can merge with all others
+fn group_mergeable_cycles(
+    cycles: &[(f64, f64, f64, Rc<Vec<EdgeIndex>>, Vec<EdgeIndex>)],
+    graph: &Graph<NodeData, RefCell<EdgeData>, Directed>,
+) -> Vec<Vec<usize>> {
+    let n = cycles.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut assigned = vec![false; n];
+    
+    // Greedy clustering: for each unassigned cycle, try to build a group
+    for i in 0..n {
+        if assigned[i] {
+            continue;
+        }
+        
+        // Start a new group with cycle i
+        let mut group = vec![i];
+        assigned[i] = true;
+        
+        log_arb_info!("[MERGE-GROUP] Starting group with cycle {}", i);
+        
+        // Try to add other unassigned cycles to this group
+        for j in (i + 1)..n {
+            if assigned[j] {
+                continue;
+            }
+            
+            // Check if cycle j can merge with ALL cycles in the current group
+            let can_merge_with_all = group.iter().all(|&k| {
+                can_merge_cycles(&cycles[j], &cycles[k])
+            });
+            
+            if can_merge_with_all {
+                log_arb_info!("[MERGE-GROUP]   Cycle {} CAN merge with all in group", j);
+                group.push(j);
+                assigned[j] = true;
+            } else {
+                // Log why it cannot merge
+                log_arb_info!("[MERGE-GROUP]   Cycle {} CANNOT merge with group {}", j, i);
+                
+                let (_, _, _, path_j, shareable_j) = &cycles[j];
+                for &k in group.iter() {
+                    let (_, _, _, path_k, shareable_k) = &cycles[k];
+                    
+                    // Find common edges
+                    let edges_j_set: HashSet<_> = path_j.iter().copied().collect();
+                    let edges_k_set: HashSet<_> = path_k.iter().copied().collect();
+                    let common_edges: HashSet<_> = edges_j_set.intersection(&edges_k_set).copied().collect();
+                    
+                    if common_edges.is_empty() {
+                        log_arb_info!("[MERGE-GROUP]     (with cycle {}): no common edges", k);
+                    } else {
+                        let shareable_j_set: HashSet<_> = shareable_j.iter().copied().collect();
+                        let shareable_k_set: HashSet<_> = shareable_k.iter().copied().collect();
+                        
+                        // Find non-shareable common edges
+                        let non_shareable_j: Vec<_> = common_edges.iter()
+                            .filter(|e| !shareable_j_set.contains(e))
+                            .copied()
+                            .collect();
+                        let non_shareable_k: Vec<_> = common_edges.iter()
+                            .filter(|e| !shareable_k_set.contains(e))
+                            .copied()
+                            .collect();
+                        
+                        if !non_shareable_j.is_empty() {
+                            let edge_info: Vec<String> = non_shareable_j.iter().map(|edge_idx| {
+                                match graph.edge_endpoints(*edge_idx) {
+                                    Some((from, to)) => {
+                                        let from_sym = graph.node_weight(from)
+                                            .map(|n| n.token.symbol.clone())
+                                            .unwrap_or_else(|| "?".to_string());
+                                        let to_sym = graph.node_weight(to)
+                                            .map(|n| n.token.symbol.clone())
+                                            .unwrap_or_else(|| "?".to_string());
+                                        format!("{:?}({} -> {})", edge_idx, from_sym, to_sym)
+                                    },
+                                    None => format!("{:?}(?)", edge_idx),
+                                }
+                            }).collect();
+                            log_arb_info!("[MERGE-GROUP]     (with cycle {}): cycle {} has {} non-shareable edges: {}", 
+                                k, j, non_shareable_j.len(), edge_info.join(", "));
+                        }
+                        if !non_shareable_k.is_empty() {
+                            let edge_info: Vec<String> = non_shareable_k.iter().map(|edge_idx| {
+                                match graph.edge_endpoints(*edge_idx) {
+                                    Some((from, to)) => {
+                                        let from_sym = graph.node_weight(from)
+                                            .map(|n| n.token.symbol.clone())
+                                            .unwrap_or_else(|| "?".to_string());
+                                        let to_sym = graph.node_weight(to)
+                                            .map(|n| n.token.symbol.clone())
+                                            .unwrap_or_else(|| "?".to_string());
+                                        format!("{:?}({} -> {})", edge_idx, from_sym, to_sym)
+                                    },
+                                    None => format!("{:?}(?)", edge_idx),
+                                }
+                            }).collect();
+                            log_arb_info!("[MERGE-GROUP]     (with cycle {}): cycle {} has {} non-shareable edges: {}", 
+                                k, k, non_shareable_k.len(), edge_info.join(", "));
+                        }
+                        
+                        if non_shareable_j.is_empty() && non_shareable_k.is_empty() {
+                            // This shouldn't happen if can_merge_cycles returned false
+                            log_arb_info!("[MERGE-GROUP]     (with cycle {}): unexpected: all common edges are shareable!", k);
+                        }
+                    }
+                }
+            }
+        }
+        
+        log_arb_info!("[MERGE-GROUP] Group completed with {} cycles", group.len());
+        // If the group contains entirely disjoint paths (no common edges among any pair),
+        // then grouping is unnecessary. Split into singleton groups.
+        if group.len() > 1 {
+            let mut any_shared_edge = false;
+            for a_idx in 0..group.len() {
+                for b_idx in (a_idx + 1)..group.len() {
+                    let a = group[a_idx];
+                    let b = group[b_idx];
+                    let (_, _, _, path_a, _) = &cycles[a];
+                    let (_, _, _, path_b, _) = &cycles[b];
+                    let set_a: HashSet<_> = path_a.iter().copied().collect();
+                    let set_b: HashSet<_> = path_b.iter().copied().collect();
+                    let common: HashSet<_> = set_a.intersection(&set_b).copied().collect();
+                    if !common.is_empty() {
+                        any_shared_edge = true;
+                        break;
+                    }
+                }
+                if any_shared_edge { break; }
+            }
+
+            if !any_shared_edge {
+                log_arb_info!("[MERGE-GROUP] Group {} has fully disjoint paths; splitting into singletons", i);
+                for &idx in &group {
+                    groups.push(vec![idx]);
+                }
+            } else {
+                groups.push(group);
+            }
+        } else {
+            groups.push(group);
+        }
+    }
+    
+    log_arb_info!("[MERGE] Grouped {} cycles into {} mergeable clusters", n, groups.len());
+    for (idx, group) in groups.iter().enumerate() {
+        log_arb_info!("[MERGE]   Group {}: cycles {:?}", idx, group);
+    }
+    
+    groups
 }
 
 /// N-dimensional optimization for multiple cycles
 /// Selects k-sized subsets of cycles and optimizes each with GSS
 pub fn optimize_merged_cycles(
-    cycles: Vec<(f64, f64, f64, Rc<Vec<EdgeIndex>>)>,
+    cycles: Vec<(f64, f64, f64, Rc<Vec<EdgeIndex>>, Vec<EdgeIndex>)>,
     graph: &Graph<NodeData, RefCell<EdgeData>, Directed>,
     stats: &mut Statistics,
     source: NodeIndex,
     amount_in_min: f64,
-    amount_in_max: f64,
     tolerance: f64,
     max_iter: usize,
     gas_price: f64,
     quoter_time: &mut Duration,
+    _max_split: usize,
 ) -> Option<MergedCycleResult> {
     let n = cycles.len();
     if n == 0 {
         return None;
     }
 
-    log_arb_info!("Optimizing {} cycles...", n);
 
-    // Try different subset sizes (k=2, k=3, ..., up to n)
+    // First, group cycles into mergeable clusters
+    let groups = group_mergeable_cycles(&cycles, graph);
+    
     let mut best_result: Option<MergedCycleResult> = None;
     let mut best_profit = f64::NEG_INFINITY;
     
-    for k in 2..=n.min(2) { // Try k=2 and k=3 (configurable)
-        log_arb_info!("[MERGE] Testing subsets of size k={}", k);
+    // Optimize each mergeable group
+    for (group_idx, group_indices) in groups.iter().enumerate() {
+        // Skip single-cycle groups (no merging benefit)
+        if group_indices.len() < 2 {
+            log_arb_info!("[MERGE] Skipping group {} (only 1 cycle)", group_idx);
+            continue;
+        }
         
-        // Generate all C(n, k) subsets
-        let subsets = generate_subsets(n, k);
-        log_arb_info!("[MERGE] Found {} subsets of size {}", subsets.len(), k);
+        log_arb_info!("[MERGE] Optimizing group {}: cycles {:?} (total {})", 
+            group_idx, group_indices, group_indices.len());
         
-        for subset_indices in subsets {
-            // Extract the cycles for this subset
-            let subset_cycles: Vec<_> = subset_indices.iter()
-                .map(|&i| cycles[i].clone())
-                .collect();
-            
-            log_arb_info!("[MERGE] Optimizing subset: {:?}", subset_indices);
-            
-            // Run GSS on this subset
-            if let Some(result) = gss_optimize_subset(
-                &subset_cycles,
-                graph,
-                stats,
-                source,
-                amount_in_min,
-                amount_in_max,
-                tolerance,
-                max_iter,
-                gas_price,
-                quoter_time,
-            ) {
-                if result.combined_net_profit > best_profit {
-                    best_profit = result.combined_net_profit;
-                    log_arb_info!("[MERGE] New best: subset {:?} with profit {:.6}", 
-                        subset_indices, result.combined_net_profit);
-                    best_result = Some(result);
-                }
+        // Extract the cycles for this group
+        let subset_cycles: Vec<_> = group_indices.iter()
+            .map(|&i| {
+                let (a, b, c, d, _e) = cycles[i].clone();
+                (a, b, c, d)
+            })
+            .collect();
+        
+        // Run GSS on this group
+        if let Some(result) = gss_optimize_subset(
+            &subset_cycles,
+            graph,
+            stats,
+            source,
+            amount_in_min,
+            tolerance,
+            max_iter,
+            gas_price,
+            quoter_time,
+        ) {
+            if result.combined_net_profit > best_profit {
+                best_profit = result.combined_net_profit;
+                log_arb_info!("[MERGE] New best: group {} with profit {:.6}", 
+                    group_idx, result.combined_net_profit);
+                best_result = Some(result);
             }
-            break; // !!!!!!! Only process one subset for debugging
         }
     }
     
@@ -392,28 +649,6 @@ pub fn optimize_merged_cycles(
     best_result
 }
 
-/// Generate all C(n, k) subsets of indices
-fn generate_subsets(n: usize, k: usize) -> Vec<Vec<usize>> {
-    let mut result = Vec::new();
-    
-    fn backtrack(n: usize, k: usize, start: usize, current: &mut Vec<usize>, result: &mut Vec<Vec<usize>>) {
-        if current.len() == k {
-            result.push(current.clone());
-            return;
-        }
-        
-        for i in start..n {
-            current.push(i);
-            backtrack(n, k, i + 1, current, result);
-            current.pop();
-        }
-    }
-    
-    let mut current = Vec::new();
-    backtrack(n, k, 0, &mut current, &mut result);
-    result
-}
-
 /// GSS optimization for a subset of cycles
 fn gss_optimize_subset(
     cycle_paths: &[(f64, f64, f64, Rc<Vec<EdgeIndex>>)],
@@ -421,7 +656,6 @@ fn gss_optimize_subset(
     stats: &mut Statistics,
     source: NodeIndex,
     amount_in_min: f64,
-    amount_in_max: f64,
     tolerance: f64,
     max_iter: usize,
     gas_price: f64,
@@ -562,3 +796,4 @@ fn gss_optimize_subset(
     
     best_result
 }
+

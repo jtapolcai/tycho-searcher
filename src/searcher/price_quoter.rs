@@ -267,9 +267,9 @@ impl EdgeData {
             }
         }
         // if not playback
-        use std::fs::OpenOptions;
-        use std::io::Write;
-        // Debug mód: ha a programot --debug kapcsolóval futtatják
+        //use std::fs::OpenOptions;
+        //use std::io::Write;
+        // Debug mode: if the code is running with --debug
         let debug_mode = std::env::args().any(|a| a == "--debug");
         if *amount_in == BigUint::zero() {
             if debug_mode {

@@ -3,6 +3,7 @@ use crate::log_arb_info;
 
 // STD
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::mpsc::Receiver;
 
@@ -35,8 +36,6 @@ use tycho_common::{
 
 use std::cell::RefCell;
 
-use std::time::Instant;
-
 pub mod graph_types; // Contains NodeData, EdgeData, GraphError, etc.
 pub mod graph_components; // Contains GraphComponents and BCC logic
 pub mod logging; // Console logging toggle
@@ -44,11 +43,12 @@ pub mod price_quoter;
 pub mod bellman_ford;
 pub mod arbitrage_save;
 pub mod merge_cycles; // Merge overlapping cycles with 2D optimization
+pub mod one_dimensional_optimisation; 
 // pub mod crate::execution::arbitrage_save_worker;
 
 use bellman_ford::{find_all_negative_cycles,describe_path};
 // Use types from graph_types module
-use graph_types::{NodeData, EdgeData, GraphError, graph_to_json, Statistics, GraphJsonPlayback};
+use graph_types::{NodeData, EdgeData, GraphError, graph_to_json, Statistics};//, GraphJsonPlayback
 // Import GraphComponents from graph_components module
 use crate::searcher::graph_components::GraphComponents;
 use crate::searcher::arbitrage_save::verify_arbitrage_opportunity;
@@ -472,6 +472,7 @@ impl Searcher {
                             }
                         }
                         let start_timer = Instant::now();
+                        // Gas price handling (division by max_split) is now done inside find_all_negative_cycles
                         let cycles = find_all_negative_cycles(
                             graph_component,
                             &mut self.stats,
@@ -483,7 +484,8 @@ impl Searcher {
                             self.cli.bf_max_outer_iterations,
                             self.cli.bf_gss_tolerance,
                             self.cli.bf_gss_max_iter,
-                            gas_price, 
+                            gas_price, // Pass real gas_price; function handles division
+                            self.cli.max_split,
                         );
                         if graph_component.node_count() >= 5 || !first_run {
                             println!("Runtime of the cycle search: {:?} in component {} with nodes {}", start_timer.elapsed(), comp_id, graph_component.node_count());
@@ -497,10 +499,11 @@ impl Searcher {
                                  //println!("Component {}: No negative cycle from: {}", comp_id, start_token_name.unwrap_or("N/A".to_string()));
                             }
                         } else {
+                            // All cycles have been validated and merged inside find_all_negative_cycles
+                            // Now just process the returned cycles (already filtered by profitability)
                             for (cycle_amount_in, _cycle_amount_out, _cycle_total_gas, cycle) in cycles {
-                                log_arb_info!("---- Negative cycle detected  -----");
+                                log_arb_info!("---- Validated cycle detected  -----");
                                 let cycle_clone = cycle.clone();
-                                // After calling verify_arbitrage_opportunity, where you submit the job
                                 if let Some((_tokens, _pools, _amount_in, _amounts_out, profit_in_microeth, _total_gas, profit_without_gas_in_microeth)) =
                                     verify_arbitrage_opportunity(
                                         cycle_clone.as_ref().clone(),
@@ -509,7 +512,7 @@ impl Searcher {
                                         &graph_component,
                                         gas_price
                                     ) {
-                                    log_arb_info!("Try token {} {:.6} ({}) profit: {:.0} mikreETH (minus gas: {:.0} mikroETH) - TOO_NEGATIVE - SKIPPING", 
+                                    log_arb_info!("Try token {} {:.6} ({}) profit: {:.0} mikreETH (minus gas: {:.0} mikroETH)", 
                                         start_token_name.as_deref().unwrap_or("Unknown"), 
                                         cycle_amount_in, 
                                         describe_path(&graph_component, &cycle_clone), 
@@ -517,7 +520,7 @@ impl Searcher {
                                         profit_without_gas_in_microeth
                                     );
                                 }
-                            };
+                            }
                         } 
                         if self.did_export_and_exit {
                             return Err(anyhow::anyhow!("Debug mode: exited without running the solver loop again."))
@@ -536,7 +539,7 @@ impl Searcher {
 
     /// Playback: run cycle search on loaded snapshot and print results
     pub fn playback_cycle_search(&mut self) {
-        // Feltételezzük, hogy a graph.json már egyetlen komponens (a teljes vagy legnagyobb részgráf)
+        // Assume that graph.json is already a single component (full or largest subgraph)
         println!("[PLAYBACK] Loaded graph: nodes={}, edges={}", self.graph.node_count(), self.graph.edge_count());
         let gas_price = self.last_gas_price.unwrap_or(25.0);
         let start_index = self.last_source
@@ -558,12 +561,13 @@ impl Searcher {
                 self.cli.bf_gss_tolerance,
                 self.cli.bf_gss_max_iter,
                 gas_price,
+                self.cli.max_split,
             );
             println!("[PLAYBACK] Found {} negative cycles", cycles.len());
             
             for (cycle_amount_in, cycle_amount_out, cycle_total_gas, cycle) in cycles {
                 let start_token_name = self.graph[start_index].token.symbol.clone();
-                if let Some((tokens, pools, amount_in, amounts_out, profit_in_microeth, total_gas, profit_without_gas_in_microeth)) =
+                if let Some((_tokens, _pools, _amount_in, _amounts_out, profit_in_microeth, _total_gas, profit_without_gas_in_microeth)) =
                     verify_arbitrage_opportunity(
                         cycle.as_ref().clone(),
                         cycle_amount_in.clone(),

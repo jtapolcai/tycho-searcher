@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use crate::searcher::{EdgeData,NodeData,Statistics};
 use crate::searcher::price_quoter::PriceDataRaw;
+use crate::searcher::one_dimensional_optimisation::{golden_section_search_with_gas,find_bottleneck_links};
 use std::collections::{HashSet, HashMap};
 use tycho_common::{
     simulation::protocol_sim::ProtocolSim,
@@ -33,19 +34,26 @@ pub fn find_all_negative_cycles(
     gss_tolerance: f64,
     gss_max_iter: usize,
     gas_price: f64, 
+    max_split: usize,
 ) -> Vec<(f64, f64, f64, Rc<Vec<EdgeIndex>>)> {
     let mut tabu_cycles: HashSet<Rc<Vec<EdgeIndex>>> = HashSet::new();
     let mut best_cycles = Vec::new();
+    let mut best_fractional_cycles = Vec::new();
     let mut _amount_in = amount_in_min;
-    // Counters for Golden-section search usage
+    
     let mut gss_calls: usize = 0;
     let mut gss_profitable: usize = 0;
-    // Total time spent in quoter_amount_out across BF + finalize + GSS
     let mut total_quoter_time: Duration = Duration::from_secs(0);
+    let mut candidate_cycles: Vec<(f64, f64, f64, Rc<Vec<EdgeIndex>>)> = Vec::new();
+    
+    // Use reduced gas price for initial cycle search
+    let gas_price_search = gas_price / (max_split as f64);
 
     loop {
-        let gas_price_search = if _amount_in < 0.01 {0.0} else {gas_price};
-        log_arb_info!("Searching cycles with amount_in = {:.6} WETH, gas_price = {:.6} gwei src:{} target:{} graph has {} nodes", _amount_in, gas_price_search, source.index(), target.index(), graph.node_count());
+        let search_gas_price = if _amount_in < 0.01 { 0.0 } else { gas_price_search };
+        log_arb_info!("Searching cycles with amount_in = {:.6} WETH, gas_price = {:.6} gwei (search mode) src:{} target:{} graph has {} nodes", 
+            _amount_in, search_gas_price, source.index(), target.index(), graph.node_count());
+        
         let (_profit_wo_gas, _profit_w_gas, cycles) = find_all_negative_cycles_amount(
             graph,
             stats,
@@ -53,12 +61,9 @@ pub fn find_all_negative_cycles(
             target,
             max_iterations,
             _amount_in,
-            gas_price_search,
+            search_gas_price,
             &mut total_quoter_time,
         );
-
-        let mut _last_best_x = None;
-        let mut _last_cycle: Option<Rc<Vec<EdgeIndex>>> = None;
 
         // Collect cycles to avoid borrow checker issues
         let new_cycles: Vec<_> = cycles
@@ -67,14 +72,15 @@ pub fn find_all_negative_cycles(
             .map(|(a, b, c, cycle_rc)| (*a, *b, *c, Rc::clone(cycle_rc)))
             .collect();
 
-    for (cycle_amount_in, cycle_amount_out, cycle_total_gas, cycle_rc) in new_cycles {
+        // PHASE 1: Collect profitable cycles with reduced gas price
+        for (cycle_amount_in, cycle_amount_out, cycle_total_gas, cycle_rc) in new_cycles {
             let cycle: &Vec<EdgeIndex> = &cycle_rc;
+            
             // Check if the cycle starts with WETH
             if let Some(&first_edge) = cycle.first() {
                 if let Some((start_node, _)) = graph.edge_endpoints(first_edge) {
                     let start_token = graph.node_weight(start_node).unwrap();
-                    let weth_symbol = "WETH";
-                    if start_token.token.symbol != weth_symbol {
+                    if start_token.token.symbol != "WETH" {
                         tabu_cycles.insert(Rc::clone(&cycle_rc));
                         continue;
                     }
@@ -86,104 +92,125 @@ pub fn find_all_negative_cycles(
                 tabu_cycles.insert(Rc::clone(&cycle_rc));
                 continue;
             }
-            let profit = cycle_amount_out - cycle_amount_in; // - gas_price * cycle_total_gas; 
+            
+            let profit = cycle_amount_out - cycle_amount_in;
             if profit > 0.0 {
-                // ARB log for profitable cycle before optimization (compute path only if logging is enabled)
                 if crate::searcher::logging::is_arb_enabled() {
                     let path_str = describe_path(graph, &cycle);
-                    let gas_cost_eth = cycle_total_gas * gas_price * 1e-9;
-                    let net_eth = (cycle_amount_out - cycle_amount_in) - gas_cost_eth;
                     log_arb_info!(
-                        "potential cycle: in={:.6}, out={:.6}, gas_units={:.0}, gas_cost={:.6} WETH, net={:.6} WETH | {}",
-                        cycle_amount_in, cycle_amount_out, cycle_total_gas, gas_cost_eth, net_eth, path_str
+                        "Found cycle (reduced gas search): in={:.6}, out={:.6}, gas={:.0} | {}",
+                        cycle_amount_in, cycle_amount_out, cycle_total_gas, path_str
                     );
                 }
-                //best_cycles.push((cycle_amount_in, cycle_amount_out, cycle_total_gas, Rc::clone(&cycle_rc)));
+                candidate_cycles.push((cycle_amount_in, cycle_amount_out, cycle_total_gas, Rc::clone(&cycle_rc)));
             }
+            
             tabu_cycles.insert(Rc::clone(&cycle_rc));
-            _last_best_x = Some(cycle_amount_in);
-            _last_cycle = Some(Rc::clone(&cycle_rc));
-            // Use GSS with gas fee to find optimal input amount
-        // Count a GSS attempt for this cycle
-        gss_calls += 1;
-        let gss_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        }
+        
+        if cycles.iter().all(|(_, _, _, c)| tabu_cycles.iter().any(|rc| rc.as_ref() == &**c)) {
+            break;
+        }
+        break;
+    }
+        
+    if !candidate_cycles.is_empty() {
+        log_arb_info!("Found {} candidate cycles with reduced gas_price={:.6} gwei", candidate_cycles.len(), gas_price_search);
+        // PHASE 2: Validate all candidates (individual + merged) with full gas_price
+        log_arb_info!("=== VALIDATION PHASE: Validating {} individual cycles with full gas_price={:.6} gwei ===", 
+            candidate_cycles.len(), gas_price);
+        
+        for (_cycle_amount_in, _cycle_amount_out, _cycle_total_gas, cycle_rc) in candidate_cycles.iter() {
+            let cycle: &Vec<EdgeIndex> = &cycle_rc;
+            
+            gss_calls += 1;
+            
+            let validation_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 golden_section_search_with_gas(
                     &cycle,
                     graph,
                     stats,
                     source,
                     amount_in_min,
-                    amount_in_max,
+                    amount_in_max, 
                     gss_tolerance,
                     gss_max_iter,
-                    gas_price,
+                    gas_price, // Use REAL gas price for validation
                     &mut total_quoter_time,
                 )
             })) {
                 Ok(result) => result,
-                Err(_) => {
-                    tabu_cycles.insert(Rc::clone(&cycle_rc));
-                    continue;
-                }
+                Err(_) => None,
             };
-
-        if let Some((best_x, amount_out, total_gas_units, net_profit)) = gss_result {
-            if net_profit >= 0.0 {
-                // at this point we have a profitable optimized cycle
-                gss_profitable += 1;
-                // Keep gas as units to be consistent with non-optimized entries
-                if crate::searcher::logging::is_arb_enabled() {
-                    let path_str = describe_path(graph, &cycle);
-                    log_arb_info!(
-                        "optimized cycle: in={:.6}, out={:.6}, gas_units={:.0}, net_profit={:.6} WETH | {}",
-                        best_x, amount_out, total_gas_units, net_profit, path_str
-                    );
+            
+            if let Some((best_x, amount_out, total_gas_units, net_profit)) = validation_result {
+                if net_profit >= 0.0 {
+                    gss_profitable += 1;
+                    if crate::searcher::logging::is_arb_enabled() {
+                        let path_str = describe_path(graph, &cycle);
+                        log_arb_info!(
+                            "Cycle validated: in={:.6}, out={:.6}, gas_units={:.0}, net_profit={:.6} WETH | {}",
+                            best_x, amount_out, total_gas_units, net_profit, path_str
+                        );
+                    }
+                    best_cycles.push((best_x, amount_out, total_gas_units, Rc::clone(&cycle_rc)));
+                } else {
+                    if crate::searcher::logging::is_arb_enabled() {
+                        let path_str = describe_path(graph, &cycle);
+                        log_arb_info!(
+                            "Cycle not profitable with full gas_price: in={:.6}, net_profit={:.6} WETH | {}",
+                            best_x, net_profit, path_str
+                        );
+                    }
                 }
-                best_cycles.push((best_x, amount_out, total_gas_units, Rc::clone(&cycle_rc)));
+                let shareable_links = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    find_bottleneck_links(
+                        &cycle,
+                        graph,
+                        stats,
+                        source,
+                        best_x, 
+                        gas_price,
+                        &mut total_quoter_time,
+                    )
+                })) {
+                    Ok(result) => result.unwrap_or_else(|| Vec::new()),
+                    Err(_) => Vec::new(),
+                };
+                // Only add to fractional cycles if bottleneck links were found
+                if !shareable_links.is_empty() {
+                    best_fractional_cycles.push((best_x, amount_out, total_gas_units, Rc::clone(&cycle_rc), shareable_links.clone()));
+                }
+            } 
+        }
+        
+        if gss_calls > 0 {
+            log_arb_info!("Validation complete: {}/{} cycles profitable with full gas_price", gss_profitable, gss_calls);
+            log_arb_info!("Total quoter time: {:?}", total_quoter_time);
+        }
+        // PHASE 3: Try merging fractional candidate cycles (up to max_split) with reduced gas price
+        if best_fractional_cycles.len() >= 2 && max_split > 1 {
+            log_arb_info!("=== MERGE PHASE: Attempting to merge up to {} cycles ===", max_split);
+            
+            if let Some(merged_result) = crate::searcher::merge_cycles::optimize_merged_cycles(
+                best_fractional_cycles.clone(),
+                graph,
+                stats,
+                source,
+                amount_in_min,
+                gss_tolerance,
+                gss_max_iter,
+                gas_price, 
+                &mut total_quoter_time,
+                max_split,
+            ) {
+                log_arb_info!("✓ Merged cycles found with combined profit = {:.6} ETH (at reduced gas)", merged_result.combined_net_profit);
+                // TODO: Convert merged_result to cycle format for validation
+                // For now, we'll validate individual cycles only
             } else {
-                if crate::searcher::logging::is_arb_enabled() {
-                    let path_str = describe_path(graph, &cycle);
-                    log_arb_info!(
-                        "Non profitable cycle: in={:.6}, out={:.6}, gas_units={:.0}, net_profit={:.6} WETH | {}",
-                        best_x, amount_out, total_gas_units, net_profit, path_str
-                    );
-                }
+                log_arb_info!("✗ No profitable merged cycles found");
             }
-            tabu_cycles.insert(Rc::clone(&cycle_rc));
-            //_last_best_x = Some(best_x);
-            //_last_cycle = Some(Rc::clone(&cycle_rc));
-        } else {
-            tabu_cycles.insert(Rc::clone(&cycle_rc));
-            continue;
         }
-    }
-    if cycles.iter().all(|(_, _, _, c)| tabu_cycles.iter().any(|rc| rc.as_ref() == &**c)) {
-            break;
-        }
-        break;
-    }
-    // Report how many cycles triggered the Golden-section search
-    if gss_calls > 0 {
-        log_arb_info!("Golden-section search called for {} cycle(s), profitable: {}", gss_calls, gss_profitable);
-        log_arb_info!("Total quoter time: {:?}", total_quoter_time);
-    }
-    
-    // Attempt to merge overlapping cycles with 2D optimization
-    if best_cycles.len() > 1 {
-        let _merged_pairs = crate::searcher::merge_cycles::optimize_merged_cycles(
-            best_cycles.clone(),
-            graph,
-            stats,
-            source,
-            amount_in_min,
-            amount_in_max,
-            gss_tolerance,
-            gss_max_iter,
-            gas_price,
-            &mut total_quoter_time,
-        );
-        // TODO: Decide how to incorporate merged pairs into the result
-        // For now, we just compute them and log them
     }
     
     best_cycles
@@ -694,142 +721,3 @@ pub fn describe_path(
 
 
 // Evaluate profit for a given cycle and input amount. Returns (is_profitable, amount_in, amount_out, total_gas_units, net_profit_in_start_token)
-fn evaluate_cycle_profit(
-    cycle: &[EdgeIndex],
-    graph: &mut Graph<NodeData, RefCell<EdgeData>, Directed>,
-    stats: &mut Statistics,
-    source: NodeIndex,
-    amount_in: f64,
-    gas_price_in_start_token: f64,
-    quoter_time: &mut Duration,
-) -> (bool, f64, f64, f64, f64) {
-    if cycle.is_empty() {
-        return (false, 0.0, 0.0, 0.0, 0.0);
-    }
-
-    let from_node_data = graph.node_weight(source).unwrap();
-    let decimals = from_node_data.token.decimals as u32;
-    let multiplier = 10f64.powi(decimals as i32);
-
-    let mut current_amount = (amount_in * multiplier).to_biguint().unwrap_or_default();
-    let mut total_gas = BigUint::zero();
-
-    let mut current_node = source;
-    for &edge_idx in cycle {
-        let (from, to) = graph.edge_endpoints(edge_idx).unwrap();
-        if from != current_node { return (false, 0.0, 0.0, 0.0, 0.0); }
-        let token_in = &graph.node_weight(from).unwrap().token;
-        let token_out = &graph.node_weight(to).unwrap().token;
-        let edge = graph.edge_weight(edge_idx).unwrap();
-        let t0 = Instant::now();
-        let result = edge.borrow().quoter_amount_out(token_in, token_out, &current_amount, stats);
-        *quoter_time += t0.elapsed();
-        if let Some(price_data) = result {
-            current_amount = price_data.amount_out;
-            total_gas += price_data.gas;
-            current_node = to;
-        } else {
-            return (false, 0.0, 0.0, 0.0, 0.0);
-        }
-    }
-
-    let amount_out = current_amount.to_f64().unwrap_or(0.0) / multiplier;
-    let profit = amount_out - amount_in;
-    let total_gas_f64 = total_gas.to_f64().unwrap_or(0.0);
-    let gas_cost_in_start = total_gas_f64 * gas_price_in_start_token * 1e-9;
-    let net_profit = profit - gas_cost_in_start;
-    (net_profit > 0.0, amount_in, amount_out, total_gas_f64, net_profit)
-}
-
-fn golden_section_search_with_gas(
-    //&self,
-    //stats: &mut Statistics,
-    //cycle: &[EdgeIndex],
-    //gas_price_in_start_node_token: f64,
-    cycle: &[EdgeIndex],
-    graph: &mut Graph<NodeData, RefCell<EdgeData>, Directed>,
-    stats: &mut Statistics,
-    source: NodeIndex,
-    amount_in_min: f64,
-    amount_in_max: f64,
-    gss_tolerance: f64,
-    gss_max_iter: usize,
-    gas_price_in_start_node_token: f64,
-    quoter_time: &mut Duration,
-) -> Option<(f64, f64, f64, f64)> {
-    // 0. lépés: keresd meg a minimális amount_in-t, amivel a kör legalább a gas költséget kitermeli
-    let mut min_in = amount_in_min.max(1e-12); // ne legyen nulla
-    let mut last_min_in ;
-    let tolerance = 1e-9;
-    let max_iter = 20;
-
-    for _ in 0..max_iter {
-        let (_profitable, _ain, aout, total_gas, _profit) =
-            evaluate_cycle_profit(cycle, graph, stats, source, min_in, gas_price_in_start_node_token, quoter_time);
-
-        let gas_cost_eth = total_gas * gas_price_in_start_node_token * 1e-9;
-
-        // Mekkora input kell, hogy legalább total_cost legyen a profit?
-        // profit = (aout - min_in) - total_cost >= 0
-        // aout - min_in = total_cost
-        // aout = min_in + total_cost
-        // Ha aout < min_in + total_cost, akkor növelni kell min_in-t
-        if aout < min_in + gas_cost_eth {
-            // Lineárisan becsüljük meg, mennyivel kell növelni
-            let diff = (min_in + gas_cost_eth) - aout;
-            last_min_in = min_in;
-            min_in += diff.max(min_in * 0.1); // legalább 10%-kal növeljük, hogy gyorsabban konvergáljon
-        } else {
-            break;
-        }
-        if (min_in - last_min_in).abs() < tolerance {
-            break;
-        }
-    }
-
-    // Ha a min_in túl nagy lett, akkor nincs értelmes megoldás
-    if min_in > amount_in_max {
-        return None;
-    }
-
-    // Golden section search a megtalált min_in-től indul
-    let mut a = min_in;
-    let mut b = amount_in_max;
-    let gr = (5.0f64.sqrt() - 1.0) / 2.0; // Golden ratio conjugate
-
-    let mut x1 = a + (1.0 - gr) * (b - a);
-    let mut x2 = a + gr * (b - a);
-
-    let mut f1 = evaluate_cycle_profit(cycle, graph, stats, source, x1, gas_price_in_start_node_token, quoter_time).4;
-    let mut f2 = evaluate_cycle_profit(cycle, graph, stats, source, x2, gas_price_in_start_node_token, quoter_time).4;
-
-    for _ in 0..gss_max_iter {
-        if f1 > f2 {
-            b = x2;
-            x2 = x1;
-            f2 = f1;
-            x1 = a + (1.0 - gr) * (b - a);
-            f1 = evaluate_cycle_profit(cycle, graph, stats, source, x1, gas_price_in_start_node_token, quoter_time).4;
-        } else {
-            a = x1;
-            x1 = x2;
-            f1 = f2;
-            x2 = a + gr * (b - a);
-            f2 = evaluate_cycle_profit(cycle, graph, stats, source, x2, gas_price_in_start_node_token, quoter_time).4;        
-        }
-
-        if (b - a).abs() < gss_tolerance {
-            break;
-        }
-    }
-
-    let best_amount = (a + b) / 2.0;
-    let (is_profitable, final_amount_in, final_amount_out, final_gas, final_profit) =
-         evaluate_cycle_profit(cycle, graph, stats, source, best_amount, gas_price_in_start_node_token, quoter_time);
-
-    if is_profitable {
-        Some((final_amount_in, final_amount_out, final_gas, final_profit))
-    } else {
-        None
-    }
-}

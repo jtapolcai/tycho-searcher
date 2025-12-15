@@ -59,6 +59,12 @@ pub struct Cli {
     #[arg(long, default_value = "40")]
     pub bf_gss_max_iter: usize,
     
+    /// Maximum number of cycles to merge together (default: 2)
+    /// During Bellman-Ford, gas_price is divided by this value
+    /// During merge, cycles are validated with real gas_price and merged up to this size
+    #[arg(long, default_value = "2")]
+    pub max_split: usize,
+    
     /// Enable all console logs (both POOL and ARB)
     #[arg(long, default_value = "false")]
     pub log: bool,

@@ -23,7 +23,7 @@ use tycho_simulation::{
 use crate::searcher::{Searcher};
 
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+//use tokio::task::JoinHandle;
 use crate::command_line_parameters::register_exchanges;
 
 pub mod command_line_parameters;
@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // Törli a quoter_log.json tartalmát debug módban, de playback esetén nem
+    // Clear quoter_log.json in debug mode, but not in playback mode
     if cli.debug && !cli.playback {
         use std::fs::File;
         File::create("quoter_log.json").ok();

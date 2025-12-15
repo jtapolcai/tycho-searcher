@@ -224,7 +224,7 @@ mod tests {
     fn test_find_all_negative_cycles_newton_iteration_with_very_small_start_value() {
         let (mut graph, source) = make_simple_graph();
         let mut stats = Statistics::default();
-        let cycles = find_all_negative_cycles(&mut graph, &mut stats, source, source, 2,0.5,1000.0,20,1e-4,40, 1.0);
+        let cycles = find_all_negative_cycles(&mut graph, &mut stats, source, source, 2,0.5,1000.0,20,1e-4,40, 1.0, 2);
         // Should find at least one cycle in this simple 2-node, 2-edge graph
         print!("Cycles found: {:?}", cycles);
     assert!(cycles.len() >= 1);
@@ -248,7 +248,7 @@ mod tests {
     fn test_find_all_negative_cycles_newton_iteration_with_small_start_value() {
         let (mut graph, source) = make_simple_graph();
         let mut stats = Statistics::default();
-        let cycles = find_all_negative_cycles(&mut graph, &mut stats, source, source, 2,1.0,1000.0,20,1e-4,40, 1.0);
+        let cycles = find_all_negative_cycles(&mut graph, &mut stats, source, source, 2,1.0,1000.0,20,1e-4,40, 1.0, 2);
         // Should find at least one cycle in this simple 2-node, 2-edge graph
         print!("Cycles found: {:?}", cycles);
     assert!(cycles.len() >= 1);
@@ -272,7 +272,7 @@ mod tests {
     fn test_find_all_negative_cycles_newton_iteration_with_large_start_value() {
         let (mut graph, source) = make_simple_graph();
         let mut stats = Statistics::default();
-        let cycles = find_all_negative_cycles(&mut graph, &mut stats, source, source, 2,75.0,1000.0,20,1e-4,40, 1.0);
+        let cycles = find_all_negative_cycles(&mut graph, &mut stats, source, source, 2,75.0,1000.0,20,1e-4,40, 1.0, 2);
         // Should find at least one cycle in this simple 2-node, 2-edge graph
         print!("Cycles found: {:?}", cycles);
     assert!(cycles.len() >= 1);
@@ -296,7 +296,7 @@ mod tests {
     fn test_find_all_negative_cycles_infeasible_as_single_pool() {
         let (mut graph, source) = make_simple_graph_single_pool();
         let mut stats = Statistics::default();
-        let cycles = find_all_negative_cycles(&mut graph, &mut stats, source, source, 2,1.0,1000.0,20,1e-4,40, 1.0);
+        let cycles = find_all_negative_cycles(&mut graph, &mut stats, source, source, 2,1.0,1000.0,20,1e-4,40, 1.0, 2);
         // Should find at least one cycle in this simple 2-node, 2-edge graph
         print!("Cycles found: {:?}", cycles);
         assert!(cycles.len()== 0);
@@ -305,7 +305,7 @@ mod tests {
     fn test_find_all_negative_cycles_infeasible_because_of_prices() {
         let (mut graph, source) = make_simple_graph_no_solution();
         let mut stats = Statistics::default();
-        let cycles = find_all_negative_cycles(&mut graph, &mut stats, source, source, 2,100.0,1000.0,10,1e-4,20, 1.0);
+        let cycles = find_all_negative_cycles(&mut graph, &mut stats, source, source, 2,100.0,1000.0,10,1e-4,20, 1.0, 2);
         // Should find at least one cycle in this simple 2-node, 2-edge graph
         assert!(cycles.is_empty());
         print!("Cycles found: {:?}", cycles);
